@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title id="page-title">Loading Station...</title>
+    <meta http-equiv="refresh" content="300">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+    <style>
+        :root {
+            --bg: #0f1115;
+            --card: #181b21;
+            --text: #e6e8eb;
+            --border: #2d3139;
+            --accent: #3b82f6;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 40px;
+            font-size: 14px;
+            overflow-x: hidden;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 25px;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .header-sub {
+            font-family: 'Roboto Mono', monospace;
+            color: var(--accent);
+            font-size: 0.8rem;
+            margin-top: 8px;
+            font-weight: 500;
+        }
+
+        .header-right {
+            text-align: right;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.75rem;
+            color: #9ca3af;
+            line-height: 1.6;
+        }
+
+        .mission-group {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 20px 25px;
+            margin-bottom: 30px;
+        }
+
+        .section-label {
+            font-size: 0.7rem;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .mission-text {
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: #d1d5db;
+            width: 100%;
+        }
+
+        .scfa-row {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+            border-top: 1px solid var(--border);
+            padding-top: 20px;
+        }
+
+        .scfa-badge {
+            font-family: 'Roboto Mono';
+            font-weight: 700;
+            padding: 4px 12px;
+            border-radius: 4px;
+            background: #000;
+            font-size: 0.9rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 25px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .metric-val {
+            font-family: 'Roboto Mono';
+            font-size: 2rem;
+            font-weight: 500;
+            color: #fff;
+            margin-top: 4px;
+        }
+
+        .env-data {
+            font-family: 'Roboto Mono';
+            font-size: 0.85rem;
+            color: #9ca3af;
+            margin-top: 4px;
+        }
+
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .hit-card {
+            background: #0f1115;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        .hit-card:hover {
+            transform: scale(1.02);
+        }
+
+        .hit-card img {
+            width: 100%;
+            height: 90px;
+            object-fit: cover;
+            image-rendering: pixelated;
+        }
+
+        .hit-info {
+            padding: 8px;
+            font-size: 10px;
+            font-family: 'Roboto Mono';
+            color: #9ca3af;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            max-width: 90%;
+            max-height: 90%;
+            border: 2px solid var(--accent);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
+            image-rendering: pixelated;
+        }
+
+        .close {
+            position: absolute;
+            top: 20px;
+            right: 35px;
+            color: #f1f1f1;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        /* New Style for Daily Breakdown */
+        .daily-row {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid #2d3139;
+            padding: 6px 0;
+            font-family: 'Roboto Mono';
+            font-size: 0.8rem;
+        }
+
+        .daily-row:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <div>
+            <h1 id="observatory-name">Loading Observatory...</h1>
+            <div class="header-sub"><span id="station-name-display">Loading Station...</span> | GEOPHYSICAL RESEARCH
+                STREAM</div>
+        </div>
+        <div class="header-right">
+            <div>OPERATOR: <span id="operator-name-display">Loading User...</span></div>
+            <div>STATUS: <span id="sys-status" style="color: #10b981">CONNECTED</span></div>
+        </div>
+    </div>
+
+    <div class="mission-group">
+        <div class="section-label">Mission Objective</div>
+        <div class="mission-text">Continuous quantification of secondary cosmic ray flux to identify 6-sigma
+            correlations with terrestrial seismic events.</div>
+        <div class="scfa-row">
+            <div
+                style="display:flex; flex-direction:column; gap:8px; border-right:1px solid var(--border); padding-right:20px; min-width:220px;">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="font-family:'Roboto Mono'; font-size:0.8rem; font-weight:700;">SCFA STATUS:</div>
+                    <div id="scfa-badge" class="scfa-badge" style="color:#6b7280; border:1px solid #6b7280;">CALIBRATING
+                    </div>
+                </div>
+                <div id="scfa-desc" style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af;">Awaiting
+                    baseline calculation...</div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:8px; flex:1;">
+                <div
+                    style="display:grid; grid-template-columns: repeat(3, 1fr); gap:15px; font-size:0.75rem; color:#9ca3af;">
+                    <div><b style="color:#10b981;">[NOMINAL]</b><br>Within 3σ baseline</div>
+                    <div><b style="color:#f59e0b;">[3-SIGMA]</b><br>99.7% anomaly</div>
+                    <div><b style="color:#ef4444;">[6-SIGMA]</b><br>Critical event</div>
+                </div>
+                <div
+                    style="font-family:'Roboto Mono'; font-size:0.65rem; color:#6b7280; margin-top:4px; border-top:1px solid var(--border); padding-top:8px;">
+                    Baseline: <span id="baseline-rate">0</span> det/hr | Current: <span id="current-rate">0</span>
+                    det/hr | Sigma: <span id="sigma-level">0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="section-label">Lifetime Detections</div>
+            <div class="metric-val" id="det-count">0</div>
+
+            <div class="section-label" style="margin-top:20px; color:#3b82f6;">7-Day Flux Count</div>
+            <div class="metric-val" id="weekly-count" style="font-size: 1.6rem; color:#3b82f6; margin-bottom: 10px;">0
+            </div>
+
+            <div id="daily-breakdown"
+                style="background: #0f1115; border-radius: 4px; padding: 10px; margin-bottom: 20px;">
+            </div>
+
+            <div class="section-label">Environmental Metrics</div>
+            <div id="solar-val" class="env-data" style="color:#fbbf24;">Solar Flare: Loading...</div>
+            <div class="env-data" id="outdoor-temp">🌡 Outdoor: 0 °C | 0 °F</div>
+            <div class="env-data" id="env-metrics">0 hPa | Unknown</div>
+        </div>
+
+        <div class="card" style="padding:20px;">
+            <div class="section-label" style="margin-bottom:15px;">Live Flux vs. Pressure Correlation (Last 7 Days)
+            </div>
+            <div style="height:200px;">
+                <canvas id="muonChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 30px;">
+        <div class="section-label">Detection Rate Analysis</div>
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 15px;">
+            <div>
+                <div style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af; margin-bottom:4px;">Last 10 Min
+                </div>
+                <div id="rate-10m" style="font-family:'Roboto Mono'; font-size:1.3rem; color:#fff; font-weight:500;">0
+                </div>
+            </div>
+            <div>
+                <div style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af; margin-bottom:4px;">Last Hour
+                </div>
+                <div id="rate-1h" style="font-family:'Roboto Mono'; font-size:1.3rem; color:#fff; font-weight:500;">0
+                </div>
+            </div>
+            <div>
+                <div style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af; margin-bottom:4px;">Last 6 Hours
+                </div>
+                <div id="rate-6h" style="font-family:'Roboto Mono'; font-size:1.3rem; color:#fff; font-weight:500;">0
+                </div>
+            </div>
+            <div>
+                <div style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af; margin-bottom:4px;">Last 24
+                    Hours</div>
+                <div id="rate-24h" style="font-family:'Roboto Mono'; font-size:1.3rem; color:#fff; font-weight:500;">0
+                </div>
+            </div>
+        </div>
+        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border);">
+            <div style="font-family:'Roboto Mono'; font-size:0.7rem; color:#9ca3af; margin-bottom:8px;">4-Hour Rolling
+                Average (Last 7 Days)</div>
+            <div style="height:120px;">
+                <canvas id="rollingChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-label">Historical Particle Track Archive (Last 10 Detections)</div>
+        <div class="gallery-grid" id="gallery-container"></div>
+    </div>
+
+    <div id="imgModal" class="modal" onclick="closeModal()">
+        <span class="close">&times;</span>
+        <img class="modal-content" id="modalImg">
+    </div>
+
+    <script>
+        const DATA_FILE = 'detections.json';
+        const ctx = document.getElementById('muonChart').getContext('2d');
+        const muonChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: 'Energy (ADC)',
+                    data: [],
+                    backgroundColor: '#3b82f6',
+                    borderColor: '#3b82f6',
+                    borderWidth: 0,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'nearest', intersect: true },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'day',
+                            displayFormats: { hour: 'MMM dd HH:mm', day: 'MMM dd' }
+                        },
+                        grid: { display: false },
+                        ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    y: {
+                        type: 'linear',
+                        min: 0, max: 255,
+                        grid: { color: '#2d3139' },
+                        ticks: { color: '#6b7280' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: '#181b21',
+                        callbacks: {
+                            title: (items) => new Date(items[0].raw.x).toLocaleString(),
+                            label: (item) => {
+                                const raw = item.raw;
+                                return [
+                                    `Energy: ${raw.y}`,
+                                    `Pressure: ${raw.pressure ? raw.pressure + ' hPa' : 'N/A'}`
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Rolling Average Chart
+        const rollingCtx = document.getElementById('rollingChart').getContext('2d');
+        const rollingChart = new Chart(rollingCtx, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: '4-Hour Rolling Avg',
+                    data: [],
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    borderColor: '#10b981',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: { unit: 'day', displayFormats: { hour: 'MMM dd HH:mm', day: 'MMM dd' } },
+                        grid: { display: false },
+                        ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    y: {
+                        type: 'linear',
+                        min: 0,
+                        grid: { color: '#2d3139' },
+                        ticks: { color: '#6b7280' }
+                    }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        // ===== STATISTICAL ANALYSIS FUNCTIONS =====
+
+        // Calculate mean and standard deviation
+        function calculateStats(values) {
+            if (values.length === 0) return { mean: 0, stdDev: 0 };
+            const mean = values.reduce((a, b) => a + b, 0) / values.length;
+            const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+            const stdDev = Math.sqrt(variance);
+            return { mean, stdDev };
+        }
+
+        // Calculate detection rate (detections per hour) for a given time window
+        function calculateDetectionRate(data, windowMs) {
+            const now = Date.now();
+            const windowStart = now - windowMs;
+            const detections = data.filter(d => d.timestamp >= windowStart);
+            const windowHours = windowMs / (1000 * 60 * 60);
+            return detections.length / windowHours;
+        }
+
+        // Calculate 4-hour rolling average
+        function calculateRollingAverage(data, windowHours = 4) {
+            const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const recentData = data.filter(d => d.timestamp >= sevenDaysAgo);
+
+            if (recentData.length === 0) return [];
+
+            // Group detections by hour
+            const hourlyBuckets = {};
+            recentData.forEach(d => {
+                const hourKey = Math.floor(d.timestamp / (1000 * 60 * 60));
+                hourlyBuckets[hourKey] = (hourlyBuckets[hourKey] || 0) + 1;
+            });
+
+            // Calculate rolling average
+            const rollingData = [];
+            const hours = Object.keys(hourlyBuckets).map(Number).sort((a, b) => a - b);
+
+            for (let i = windowHours - 1; i < hours.length; i++) {
+                const windowSum = hours.slice(i - windowHours + 1, i + 1)
+                    .reduce((sum, h) => sum + (hourlyBuckets[h] || 0), 0);
+                const avg = windowSum / windowHours;
+                rollingData.push({
+                    x: hours[i] * 1000 * 60 * 60,
+                    y: avg
+                });
+            }
+
+            return rollingData;
+        }
+
+        // Calculate baseline from ALL historical data
+        function calculateBaseline(data) {
+            if (data.length < 10) return null;  // Need minimum data
+
+            // Calculate hourly detection rates over entire history
+            const hourlyRates = [];
+            const dataByHour = {};
+
+            data.forEach(d => {
+                const hourKey = Math.floor(d.timestamp / (1000 * 60 * 60));
+                dataByHour[hourKey] = (dataByHour[hourKey] || 0) + 1;
+            });
+
+            Object.values(dataByHour).forEach(count => {
+                hourlyRates.push(count);  // detections per hour
+            });
+
+            return calculateStats(hourlyRates);
+        }
+
+        // Update SCFA status based on current rate vs baseline
+        function updateSCFAStatus(currentRate, baseline) {
+            const badge = document.getElementById('scfa-badge');
+            const desc = document.getElementById('scfa-desc');
+            const baselineRateEl = document.getElementById('baseline-rate');
+            const currentRateEl = document.getElementById('current-rate');
+            const sigmaLevelEl = document.getElementById('sigma-level');
+
+            if (!baseline || baseline.stdDev === 0) {
+                badge.textContent = 'CALIBRATING';
+                badge.style.color = '#6b7280';
+                badge.style.borderColor = '#6b7280';
+                desc.textContent = 'Collecting baseline data (minimum 24 hours required)...';
+                baselineRateEl.textContent = '0';
+                currentRateEl.textContent = currentRate.toFixed(2);
+                sigmaLevelEl.textContent = '0';
+                return;
+            }
+
+            const deviation = currentRate - baseline.mean;
+            const sigmaLevel = baseline.stdDev > 0 ? deviation / baseline.stdDev : 0;
+
+            baselineRateEl.textContent = baseline.mean.toFixed(2);
+            currentRateEl.textContent = currentRate.toFixed(2);
+            sigmaLevelEl.textContent = sigmaLevel.toFixed(2) + 'σ';
+
+            if (sigmaLevel >= 6) {
+                badge.textContent = '6-SIGMA';
+                badge.style.color = '#ef4444';
+                badge.style.borderColor = '#ef4444';
+                desc.textContent = 'CRITICAL: Detection rate 6σ above baseline. Potential geophysical correlation.';
+            } else if (sigmaLevel >= 3) {
+                badge.textContent = '3-SIGMA';
+                badge.style.color = '#f59e0b';
+                badge.style.borderColor = '#f59e0b';
+                desc.textContent = 'ANOMALY: Detection rate 3σ above baseline. 99.7% probability of deviation.';
+            } else {
+                badge.textContent = 'NOMINAL';
+                badge.style.color = '#10b981';
+                badge.style.borderColor = '#10b981';
+                desc.textContent = 'System operating within standard baseline levels.';
+            }
+        }
+
+        async function refreshDashboard() {
+            try {
+                const r = await fetch(DATA_FILE + '?t=' + Date.now());
+                if (!r.ok) throw new Error("File not found");
+                const data = await r.json();
+
+                // 1. Update Lifetime Count
+                document.getElementById('det-count').innerText = data.length;
+
+                // 2. Filter Data (Last 7 Days)
+                const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+                const recentData = data.filter(d => d.timestamp >= sevenDaysAgo);
+
+                // 3. Update 7-Day Total
+                document.getElementById('weekly-count').innerText = recentData.length;
+
+                // 4. NEW: Generate Daily Breakdown
+                const dailyCounts = {};
+
+                // Initialize array for sorting
+                recentData.forEach(d => {
+                    // Create date key "Mon Jan 19"
+                    const dateObj = new Date(d.timestamp);
+                    const dateKey = dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                    dailyCounts[dateKey] = (dailyCounts[dateKey] || 0) + 1;
+                });
+
+                const breakdownContainer = document.getElementById('daily-breakdown');
+                breakdownContainer.innerHTML = ''; // Clear old
+
+                // Sort keys by date (trickier with just strings, so we re-sort based on keys presence in data)
+                // Simple approach: Iterate last 7 days logically
+                for (let i = 0; i < 7; i++) {
+                    const d = new Date();
+                    d.setDate(d.getDate() - i);
+                    const key = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+
+                    const count = dailyCounts[key] || 0;
+                    const row = `<div class="daily-row">
+                        <span style="color: #9ca3af">${key}</span>
+                        <span style="color: #fff; font-weight: bold;">${count}</span>
+                    </div>`;
+                    breakdownContainer.innerHTML += row;
+                }
+
+                // 5. Update Chart
+                const chartPoints = recentData.map(d => ({
+                    x: d.timestamp,
+                    y: d.max,
+                    pressure: d.pressure
+                }));
+                muonChart.data.datasets[0].data = chartPoints;
+                muonChart.update();
+
+                // 6. Update Gallery (LAST 10 ONLY)
+                const gallery = document.getElementById('gallery-container');
+                gallery.innerHTML = '';
+
+                // CHANGED: slice(-10) instead of slice(-12)
+                data.slice(-10).reverse().forEach(hit => {
+                    if (hit.frame_content) {
+                        const div = document.createElement('div');
+                        div.className = 'hit-card';
+                        const src = hit.frame_content.startsWith('data:')
+                            ? hit.frame_content
+                            : `data:image/png;base64,${hit.frame_content}`;
+                        const timeStr = new Date(hit.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        div.ondblclick = () => openModal(src);
+                        div.innerHTML = `
+                            <img src="${src}">
+                            <div class="hit-info">Energy: ${hit.max} | ${timeStr}</div>
+                        `;
+                        gallery.appendChild(div);
+                    }
+                });
+
+                // 7. Calculate Detection Rates
+                const rate10m = calculateDetectionRate(data, 10 * 60 * 1000);
+                const rate1h = calculateDetectionRate(data, 60 * 60 * 1000);
+                const rate6h = calculateDetectionRate(data, 6 * 60 * 60 * 1000);
+                const rate24h = calculateDetectionRate(data, 24 * 60 * 60 * 1000);
+
+                document.getElementById('rate-10m').innerText = rate10m.toFixed(2);
+                document.getElementById('rate-1h').innerText = rate1h.toFixed(2);
+                document.getElementById('rate-6h').innerText = rate6h.toFixed(2);
+                document.getElementById('rate-24h').innerText = rate24h.toFixed(2);
+
+                // 8. Calculate and Update SCFA Status
+                const baseline = calculateBaseline(data);
+                const currentRate = rate1h;  // Use 1-hour rate as current
+                updateSCFAStatus(currentRate, baseline);
+
+                // 9. Update Rolling Average Chart
+                const rollingData = calculateRollingAverage(data, 4);
+                rollingChart.data.datasets[0].data = rollingData;
+                rollingChart.update();
+
+                // 10. Update Metrics
+                if (data.length > 0) {
+                    const last = data[data.length - 1];
+                    let press = last.pressure || 0;
+                    const cam = last.camera_model || "Unknown";
+
+                    if (last.metadata) {
+                        try {
+                            const metaData = JSON.parse(last.metadata);
+                            if (metaData.pressure_hpa) {
+                                press = metaData.pressure_hpa;
+                            }
+                        } catch (e) { }
+                    }
+
+                    document.getElementById('env-metrics').innerText = `pressure_hpa: ${press} hPa | ${cam}`;
+
+                    if (last.metadata) {
+                        try {
+                            const metaData = JSON.parse(last.metadata);
+                            if (metaData.station_id) {
+                                document.getElementById('page-title').innerText = `${metaData.station_id} Dashboard`;
+                                document.getElementById('station-name-display').innerText = metaData.station_id;
+                                const obsName = document.getElementById('observatory-name');
+                                if (obsName) obsName.innerText = `${metaData.station_id.toUpperCase()} OBSERVATORY`;
+                            }
+                            if (metaData.operator) {
+                                document.getElementById('operator-name-display').innerText = metaData.operator;
+                            }
+                        } catch (e) { console.error("Could not parse metadata", e); }
+                    }
+                }
+
+            } catch (e) {
+                console.error("Dash Error:", e);
+            }
+        }
+
+        async function updateConnectionStatus() {
+            try {
+                const r = await fetch('status.json?t=' + Date.now());
+                if (!r.ok) throw new Error("Status file not found");
+                const statusData = await r.json();
+
+                if (statusData.station) {
+                    document.getElementById('page-title').innerText = `${statusData.station} Dashboard`;
+                    document.getElementById('station-name-display').innerText = statusData.station;
+                    const obsName = document.getElementById('observatory-name');
+                    if (obsName) obsName.innerText = `${statusData.station.toUpperCase()} OBSERVATORY`;
+                }
+                if (statusData.operator) {
+                    document.getElementById('operator-name-display').innerText = statusData.operator;
+                }
+                
+                if (statusData.pressure_hpa && statusData.camera_model) {
+                    document.getElementById('env-metrics').innerText = `pressure_hpa: ${statusData.pressure_hpa} hPa | ${statusData.camera_model}`;
+                }
+
+                if (statusData.connected) {
+                    document.getElementById('sys-status').innerText = "CONNECTED";
+                    document.getElementById('sys-status').style.color = "#10b981";
+                } else {
+                    document.getElementById('sys-status').innerText = "DISCONNECTED";
+                    document.getElementById('sys-status').style.color = "#ef4444";
+                }
+            } catch (e) {
+                document.getElementById('sys-status').innerText = "DISCONNECTED";
+                document.getElementById('sys-status').style.color = "#ef4444";
+            }
+        }
+
+        async function updateSolar() {
+            try {
+                const r = await fetch('https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json');
+                const d = await r.json();
+                const val = (d && d.length > 0 && d[d.length - 1].class_max) ? d[d.length - 1].class_max : "QUIET";
+                document.getElementById('solar-val').innerText = "Solar X-Ray Flux: " + val;
+            } catch (e) {
+                document.getElementById('solar-val').innerText = "Solar X-Ray Flux: OFFLINE";
+            }
+        }
+
+        async function updateWeather() {
+            try {
+                // 1. Get coordinates from CMOSmicRay
+                let lat = 40.7128; let lng = -74.0060; let locName = "NYC";
+                try {
+                    const statusRes = await fetch('status.json?t=' + Date.now());
+                    if (statusRes.ok) {
+                        const s = await statusRes.json();
+                        if (s.lat && s.lng) { lat = s.lat; lng = s.lng; locName = "Station"; }
+                    }
+                } catch(e) {}
+
+                // 2. Fetch from Open-Meteo
+                const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,surface_pressure`);
+                const d = await r.json();
+                const current = d.current || {};
+                const outdoorC = current.temperature_2m;
+                if (outdoorC !== undefined) {
+                    const outdoorF = ((outdoorC * 9 / 5) + 32).toFixed(1);
+                    document.getElementById('outdoor-temp').innerText = `\uD83C\uDF21 Outdoor (${locName}): ${outdoorC}\u00b0C (${outdoorF}\u00b0F)`;
+                    document.getElementById('outdoor-temp').style.color = '#34d399';
+                }
+            } catch (e) {
+                document.getElementById('outdoor-temp').innerText = '\uD83C\uDF21 Outdoor: Unavailable';
+            }
+        }
+
+        function openModal(src) {
+            document.getElementById('modalImg').src = src;
+            document.getElementById('imgModal').style.display = 'flex';
+        }
+        function closeModal() {
+            document.getElementById('imgModal').style.display = 'none';
+        }
+
+        async function loadStationFromScript() {
+            try {
+                const r = await fetch('start_CMOSmicRay.sh?t=' + Date.now());
+                if (r.ok) {
+                    const text = await r.text();
+                    const match = text.match(/export CREDO_STATION="([^"]+)"/);
+                    if (match && match[1]) {
+                        const obsName = document.getElementById('observatory-name');
+                        if (obsName) obsName.innerText = match[1].toUpperCase() + " OBSERVATORY";
+                        document.getElementById('page-title').innerText = `${match[1]} Dashboard`;
+                        document.getElementById('station-name-display').innerText = match[1];
+                    }
+                }
+            } catch (e) { console.error("Could not read start_CMOSmicRay.sh", e); }
+        }
+
+        refreshDashboard();
+        loadStationFromScript();
+        updateConnectionStatus();
+        updateSolar();
+        updateWeather();
+        setInterval(refreshDashboard, 30000);
+        setInterval(updateConnectionStatus, 30000);
+        setInterval(updateSolar, 600000);
+        setInterval(updateWeather, 900000);
+    </script>
+</body>
+
+</html>

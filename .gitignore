@@ -1,0 +1,21 @@
+# Local environment variables and credentials
+.env
+
+# Runtime logging and caching
+*.log
+status.json
+detections.json
+__pycache__/
+*.pyc
+
+# Local image captures
+CMOSmicRay_images/
+*.png
+*.jpg
+!rpi_model_b.jpg
+!dashboard_preview.png
+!monitor_dashboard.JPG
+
+# OS generated files
+.DS_Store
+Thumbs.db
