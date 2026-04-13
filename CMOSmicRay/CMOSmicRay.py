@@ -19,6 +19,13 @@ import sys
 import logging
 import copy
 from datetime import datetime
+import asyncio
+import websockets
+from collections import deque
+from dotenv import load_dotenv
+
+# Load local environment variables if .env exists
+load_dotenv()
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -26,6 +33,8 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
+# Suppress noisy library logs to avoid confusion with CREDO connection
+logging.getLogger("websockets").setLevel(logging.WARNING)
 
 # --- CONFIGURATION ---
 STATION_ID = os.getenv("CREDO_STATION") 
@@ -79,6 +88,9 @@ ALT = float(os.getenv("CREDO_ALT"))
 # --- STATE ---
 bg_frame = None; alpha = 0.01; current_token = None
 SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
+last_frame_time = time.time()
+data_cache = deque(maxlen=10000)
+connected_clients = set()
 
 # --- ATMOSPHERIC STATE ---
 cached_pressure = 1013.25 
@@ -109,6 +121,60 @@ def get_pressure():
 
 def get_outdoor_temp():
     return cached_outdoor_temp
+
+def ws_thread_target():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def broadcast():
+        while True:
+            await asyncio.sleep(1)
+            now = time.time()
+            sys_status = "SYSTEM_STALLED" if (now - last_frame_time > 5.0) else "OK"
+            
+            t_ms = int(now * 1000)
+            payload = {
+                "type": "update",
+                "timestamp": t_ms,
+                "temp": get_outdoor_temp() or 0.0,
+                "pressure": get_pressure() or 0.0,
+                "system_status": sys_status
+            }
+            data_cache.append(payload)
+            
+            if connected_clients:
+                msg = json.dumps(payload)
+                for ws in list(connected_clients):
+                    try:
+                        await ws.send(msg)
+                    except:
+                        pass
+                        
+    async def handler(*args):
+        websocket = args[0]
+        connected_clients.add(websocket)
+        logging.info("[DASHBOARD] WebSocket Client Connected.")
+        try:
+            await websocket.send(json.dumps({
+                "type": "init", 
+                "data": list(data_cache),
+                "script_start": SCRIPT_START
+            }))
+            async for _ in websocket: pass
+        except:
+            pass
+        finally:
+            if websocket in connected_clients:
+                connected_clients.remove(websocket)
+            logging.info("[DASHBOARD] WebSocket Client Disconnected.")
+
+    async def main():
+        asyncio.create_task(broadcast())
+        # websockets.serve supports both single and double args depending on version
+        async with websockets.serve(handler, "0.0.0.0", 8001):
+            await asyncio.Future()
+
+    loop.run_until_complete(main())
 
 def tune_driver():
     logging.info(f"[HARDWARE] Tuning {PROFILE_KEY} ({PROFILE['driver_quirk']})...")
@@ -170,19 +236,24 @@ def payload_inspector(tag, data):
 def login():
     global current_token
     try:
+        logging.info(f"[AUTH] Attempting Login for {CREDO_USER}...")
         r = requests.post(LOGIN_URL, json={
             "username": CREDO_USER, "password": CREDO_PASS, "device_id": STATION_ID,
             "device_type": "detector", "device_model": DEVICE_MODEL, 
             "system_version": "Linux", "app_version": SOFTWARE_VERSION
         }, timeout=20)
+        
         if r.status_code == 200: 
             current_token = r.json().get('token')
-            logging.info("[AUTH] Login Successful.")
+            logging.info("[AUTH] Login Successful. Token acquired.")
             update_status_file(True)
             return True
-        update_status_file(False)
-        return False
-    except: 
+        else:
+            logging.error(f"[AUTH] Login Failed. Status: {r.status_code} | Body: {r.text}")
+            update_status_file(False)
+            return False
+    except Exception as e: 
+        logging.error(f"[AUTH] Connection Error during Login: {e}")
         update_status_file(False)
         return False
 
@@ -284,11 +355,56 @@ def process_hit(frame, x, y, max_val):
     threading.Thread(target=save_local_log, args=(local_payload,)).start()
     logging.info(f"[HIT] Energy:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
 
+def config_watcher():
+    global CREDO_USER, CREDO_PASS, STATION_ID, DEVICE_MODEL, SOFTWARE_VERSION, LAT, LNG, ALT, current_token
+    last_mtime = 0
+    env_path = os.path.join(BASE_DIR, ".env")
+    if not os.path.exists(env_path):
+        env_path = ".env"
+        
+    while True:
+        try:
+            if os.path.exists(env_path):
+                current_mtime = os.path.getmtime(env_path)
+                if current_mtime > last_mtime:
+                    if last_mtime != 0:
+                        load_dotenv(dotenv_path=env_path, override=True)
+                        old_user = CREDO_USER
+                        old_pass = CREDO_PASS
+                        
+                        CREDO_USER = os.getenv("CREDO_USER")
+                        CREDO_PASS = os.getenv("CREDO_PASS")
+                        STATION_ID = os.getenv("CREDO_STATION")
+                        DEVICE_MODEL = os.getenv("CREDO_DEVICE_MODEL")
+                        SOFTWARE_VERSION = os.getenv("CREDO_SOFTWARE_VERSION")
+                        
+                        try: LAT = float(os.getenv("CREDO_LAT", LAT))
+                        except: pass
+                        try: LNG = float(os.getenv("CREDO_LNG", LNG))
+                        except: pass
+                        try: ALT = float(os.getenv("CREDO_ALT", ALT))
+                        except: pass
+                        
+                        if old_user != CREDO_USER or old_pass != CREDO_PASS:
+                            current_token = None
+                            logging.info(f"[CONFIG] Live Operator update detected ({CREDO_USER}).")
+                        
+                        update_status_file(True if current_token else False)
+                    last_mtime = current_mtime
+        except Exception:
+            pass
+        time.sleep(2)
+
 if __name__ == "__main__":
     logging.info(f"--- CMOSmicRay {SOFTWARE_VERSION} ---")
+    logging.info(f"[CONFIG] Station: {STATION_ID} | Operator: {CREDO_USER}")
+    logging.info(f"[CONFIG] Location: {LAT}, {LNG} (Alt: {ALT}m)")
+    
     get_pressure() 
     tune_driver()
     threading.Thread(target=ping, daemon=True).start()
+    threading.Thread(target=ws_thread_target, daemon=True).start()
+    threading.Thread(target=config_watcher, daemon=True).start()
 
     cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
     cap.set(3, CAPTURE_WIDTH); cap.set(4, CAPTURE_HEIGHT); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -297,6 +413,10 @@ if __name__ == "__main__":
     while True:
         ret, frame = cap.read()
         if not ret: time.sleep(1); continue
+        
+        # Watchdog status update
+        last_frame_time = time.time()
+        
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if bg_frame is None: bg_frame = gray.astype("float"); continue
         cv2.accumulateWeighted(gray, bg_frame, alpha)

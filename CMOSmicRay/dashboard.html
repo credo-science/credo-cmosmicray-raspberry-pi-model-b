@@ -30,6 +30,35 @@
             overflow-x: hidden;
         }
 
+        .status-ok {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #10b981;
+            animation: pulse 1s infinite alternate;
+            margin-left: 8px;
+        }
+        .status-error {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ef4444;
+            animation: shake 0.5s infinite;
+            margin-left: 8px;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.5; transform: scale(0.8); }
+            100% { opacity: 1; transform: scale(1.2); }
+        }
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            50% { transform: translateX(2px); }
+            75% { transform: translateX(-2px); }
+        }
+
         .header {
             display: flex;
             justify-content: space-between;
@@ -227,7 +256,9 @@
         </div>
         <div class="header-right">
             <div>OPERATOR: <span id="operator-name-display">Loading User...</span></div>
-            <div>STATUS: <span id="sys-status" style="color: #10b981">CONNECTED</span></div>
+            <div>STATUS: <span id="sys-status" style="color: #10b981">CONNECTED</span> <span id="heartbeat-dot" class="status-ok"></span></div>
+            <div style="margin-top: 4px;">UPTIME: <span id="sys-uptime">00:00:00</span></div>
+            <div style="margin-top: 8px; cursor: pointer; display: inline-block;" onclick="document.getElementById('settingsModal').style.display='flex'">⚙️ Settings</div>
         </div>
     </div>
 
@@ -337,55 +368,118 @@
         <img class="modal-content" id="modalImg">
     </div>
 
+    <div id="settingsModal" class="modal" style="display:none; position:fixed; z-index:2000; left:0; top:0; width:100%; height:100%; background: rgba(0,0,0,0.8); align-items:center; justify-content:center;">
+        <div style="background: var(--card); border: 1px solid var(--border); padding: 30px; border-radius: 8px; width: 300px;">
+            <h3 style="margin-top:0">Settings</h3>
+            <div style="margin-bottom: 20px;">
+               <label>Graph Refresh Interval (ms)</label>
+               <input type="number" id="refresh-interval-input" value="1000" style="width:100%; padding:8px; margin-top:5px; background:#0f1115; color:#fff; border:1px solid #2d3139;">
+            </div>
+            <div style="margin-bottom: 20px; display:flex; align-items:center;">
+               <label>Live Scroll View</label>
+               <input type="checkbox" id="live-scroll-toggle" checked style="margin-left: 10px;">
+            </div>
+            <button onclick="document.getElementById('settingsModal').style.display='none'" style="width:100%; padding: 10px; background: var(--accent); color:#fff; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">Close</button>
+        </div>
+    </div>
+
     <script>
+        // --- HEARTBEAT WORKER ---
+        const workerCode = `
+            let timerId;
+            let ticks = 0;
+            self.onmessage = function(e) {
+                if (e.data === 'start') {
+                    if (!timerId) {
+                        timerId = setInterval(() => {
+                            ticks++;
+                            self.postMessage(ticks);
+                        }, 1000);
+                    }
+                } else if (e.data === 'stop') {
+                    clearInterval(timerId);
+                    timerId = null;
+                }
+            };
+        `;
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+        let backendStartTime = null;
+        worker.onmessage = function(e) {
+            if (!backendStartTime) return;
+            const t = Math.floor((Date.now() - backendStartTime) / 1000);
+            const h = String(Math.floor(t / 3600)).padStart(2, '0');
+            const m = String(Math.floor((t % 3600) / 60)).padStart(2, '0');
+            const s = String(t % 60).padStart(2, '0');
+            const uptimeEl = document.getElementById('sys-uptime');
+            if (uptimeEl) uptimeEl.innerText = `${h}:${m}:${s}`;
+        };
+
         const DATA_FILE = 'detections.json';
         const ctx = document.getElementById('muonChart').getContext('2d');
         const muonChart = new Chart(ctx, {
             type: 'line',
             data: {
-                datasets: [{
-                    label: 'Energy (ADC)',
-                    data: [],
-                    backgroundColor: '#3b82f6',
-                    borderColor: '#3b82f6',
-                    borderWidth: 0,
-                    pointRadius: 4,
-                    pointHoverRadius: 6
-                }]
+                datasets: [
+                    {
+                        label: 'Pressure (hPa)',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: '#3b82f6',
+                        yAxisID: 'yPressure',
+                        pointRadius: 0,
+                        borderWidth: 2
+                    },
+                    {
+                        label: 'Temperature (°C)',
+                        data: [],
+                        borderColor: '#f97316',
+                        backgroundColor: '#f97316',
+                        yAxisID: 'yTemp',
+                        pointRadius: 0,
+                        borderWidth: 2
+                    }
+                ]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                interaction: { mode: 'nearest', intersect: true },
+                interaction: { mode: 'index', intersect: false },
                 scales: {
                     x: {
                         type: 'time',
                         time: {
-                            unit: 'day',
-                            displayFormats: { hour: 'MMM dd HH:mm', day: 'MMM dd' }
+                            unit: 'minute',
+                            displayFormats: { minute: 'HH:mm:ss' }
                         },
                         grid: { display: false },
                         ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
                     },
-                    y: {
+                    yPressure: {
                         type: 'linear',
-                        min: 0, max: 255,
+                        position: 'left',
                         grid: { color: '#2d3139' },
-                        ticks: { color: '#6b7280' }
+                        ticks: { color: '#3b82f6' }
+                    },
+                    yTemp: {
+                        type: 'linear',
+                        position: 'right',
+                        grid: { drawOnChartArea: false },
+                        ticks: { color: '#f97316' }
                     }
                 },
                 plugins: {
-                    legend: { display: false },
+                    legend: { 
+                        display: true,
+                        labels: { color: '#e6e8eb', font: { family: 'Inter'} }
+                    },
                     tooltip: {
                         backgroundColor: '#181b21',
                         callbacks: {
                             title: (items) => new Date(items[0].raw.x).toLocaleString(),
                             label: (item) => {
-                                const raw = item.raw;
-                                return [
-                                    `Energy: ${raw.y}`,
-                                    `Pressure: ${raw.pressure ? raw.pressure + ' hPa' : 'N/A'}`
-                                ];
+                                const val = item.raw.y;
+                                return `${item.dataset.label}: ${val.toFixed(2)}`;
                             }
                         }
                     }
@@ -590,14 +684,7 @@
                     breakdownContainer.innerHTML += row;
                 }
 
-                // 5. Update Chart
-                const chartPoints = recentData.map(d => ({
-                    x: d.timestamp,
-                    y: d.max,
-                    pressure: d.pressure
-                }));
-                muonChart.data.datasets[0].data = chartPoints;
-                muonChart.update();
+                // 5. Update Live Chart - Moved to WebSocket logic
 
                 // 6. Update Gallery (LAST 10 ONLY)
                 const gallery = document.getElementById('gallery-container');
@@ -662,15 +749,10 @@
                     if (last.metadata) {
                         try {
                             const metaData = JSON.parse(last.metadata);
-                            if (metaData.station_id) {
-                                document.getElementById('page-title').innerText = `${metaData.station_id} Dashboard`;
-                                document.getElementById('station-name-display').innerText = metaData.station_id;
-                                const obsName = document.getElementById('observatory-name');
-                                if (obsName) obsName.innerText = `${metaData.station_id.toUpperCase()} OBSERVATORY`;
-                            }
-                            if (metaData.operator) {
-                                document.getElementById('operator-name-display').innerText = metaData.operator;
-                            }
+                            // We purposefully do NOT update station_id and operator here
+                            // because detections.json contains historical data.
+                            // The live operator is updated exclusively via status.json
+                            // to prevent the dashboard from reverting to older operators.
                         } catch (e) { console.error("Could not parse metadata", e); }
                     }
                 }
@@ -775,6 +857,77 @@
             } catch (e) { console.error("Could not read start_CMOSmicRay.sh", e); }
         }
 
+        function setupWebSocket() {
+            const ws = new WebSocket(`ws://${location.hostname}:8001`);
+            
+            ws.onopen = () => {
+                console.log("WebSocket connected.");
+                worker.postMessage('start');
+            };
+            
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'init') {
+                    if (msg.script_start) backendStartTime = msg.script_start;
+                    const cache = msg.data;
+                    const pressureData = [];
+                    const tempData = [];
+                    cache.forEach(pt => {
+                        pressureData.push({ x: pt.timestamp, y: pt.pressure });
+                        tempData.push({ x: pt.timestamp, y: pt.temp });
+                    });
+                    muonChart.data.datasets[0].data = pressureData;
+                    muonChart.data.datasets[1].data = tempData;
+                    muonChart.update();
+                } else if (msg.type === 'update') {
+                    const pt = msg;
+                    
+                    const statusEl = document.getElementById('sys-status');
+                    const hbDot = document.getElementById('heartbeat-dot');
+                    
+                    if (pt.system_status === 'OK') {
+                        if (statusEl.innerText !== "CONNECTED") {
+                            statusEl.innerText = "CONNECTED";
+                            statusEl.style.color = "#10b981";
+                            hbDot.className = "status-ok";
+                        }
+                    } else {
+                        if (statusEl.innerText !== "CONNECTION INTERRUPTED") {
+                            statusEl.innerText = "CONNECTION INTERRUPTED";
+                            statusEl.style.color = "#ef4444";
+                            hbDot.className = "status-error";
+                        }
+                    }
+                    
+                    // Add point
+                    muonChart.data.datasets[0].data.push({ x: pt.timestamp, y: pt.pressure });
+                    muonChart.data.datasets[1].data.push({ x: pt.timestamp, y: pt.temp });
+                    
+                    // Max points limit
+                    if (muonChart.data.datasets[0].data.length > 10000) {
+                        muonChart.data.datasets[0].data.shift();
+                        muonChart.data.datasets[1].data.shift();
+                    }
+                    
+                    const isLiveScroll = document.getElementById('live-scroll-toggle').checked;
+                    if (isLiveScroll) {
+                        muonChart.options.scales.x.min = Date.now() - 300000; // 5 mins range
+                        muonChart.options.scales.x.max = Date.now();
+                        muonChart.update('none'); // fast update
+                    }
+                }
+            };
+            
+            ws.onclose = () => {
+                worker.postMessage('stop');
+                document.getElementById('sys-status').innerText = "DISCONNECTED";
+                document.getElementById('sys-status').style.color = "#ef4444";
+                document.getElementById('heartbeat-dot').className = "status-error";
+                setTimeout(setupWebSocket, 5000);
+            };
+        }
+
+        setupWebSocket();
         refreshDashboard();
         loadStationFromScript();
         updateConnectionStatus();

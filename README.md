@@ -6,7 +6,7 @@
 
 **CMOSmicRay** is a production-grade cosmic ray detector client for the [CREDO Project](https://credo.science/). It transforms a standard webcam and a Raspberry Pi into a scientific instrument capable of detecting high-energy particle interactions (muons).
 
-This software is optimized for **Legacy Hardware** (e.g., Raspberry Pi Model B) but runs perfectly on modern devices. It features automatic camera driver tuning, fault-tolerant network reporting, 64x64 pixel "Region of Interest" event cropping, and a dynamic local monitoring dashboard.
+This software is optimized for **Legacy Hardware** (e.g., Raspberry Pi Model B) but runs perfectly on modern devices. It features automatic camera driver tuning, fault-tolerant network reporting, 64x64 pixel "Region of Interest" event cropping, a dynamic local monitoring dashboard, and **Live Configuration Swapping** for changing operators and settings on-the-fly without requiring a restart.
 
 ---
 
@@ -45,60 +45,64 @@ sudo apt-get upgrade -y
 ### Step 2: Install System Dependencies
 We use system-level packages for OpenCV and Video4Linux utilities. This is preferred over pip for Raspberry Pi to avoid long compilation times.
 ```bash
-sudo apt-get install -y python3-opencv python3-numpy python3-requests v4l-utils
+sudo apt-get install -y python3-opencv python3-numpy python3-requests python3-websockets v4l-utils
 ```
 * **python3-opencv**: The computer vision library.
+* **python3-websockets**: Required for the real-time Dashboard data feed.
 * **v4l-utils**: Required for the script to auto-tune camera exposure settings (`v4l2-ctl`).
+
+Alternatively, you can install the python packages via pip using the included `requirements.txt`:
+```bash
+pip3 install -r requirements.txt
+```
 
 ### Step 3: Clone the Repository
 Download the production code to your home directory.
 ```bash
 cd ~
-git clone https://github.com/jakelee2029/CMOSmicRay.git
-cd CMOSmicRay
+git clone https://github.com/credo-science/credo-cmosmicray-raspberry-pi-model-b.git
+cd credo-cmosmicray-raspberry-pi-model-b
 ```
 
 ---
 
 ## ⚙️ Configuration
 
-The CMOSmicRay uses Environment Variables for security and configuration. 
+CMOSmicRay uses a `.env` file for security and configuration. 
 
-### Option A: Manual Launch
-Run these commands in your terminal before starting the script:
+### Step 1: Create your .env file
+Configuration and credentials have moved from the shell script to a standard `.env` file in the `CMOSmicRay` directory. 
+
+You **must** create a file named `.env` in the same directory as the script and provide your actual details. 
+
+**Contents of your `.env` file:**
 ```bash
-# Credential Configuration
-export CREDO_STATION="Your-Station-Name"
-export CREDO_USER="your_credo_username"
-export CREDO_PASS="your_credo_password"
+# --- USER CREDENTIALS ---
+CREDO_USER="your_username"
+CREDO_PASS="your_password"
+CREDO_STATION="YourStationName"
 
-# Hardware Configuration (Selects the correct driver profile)
-export CREDO_CAMERA_MODEL="C270"  # Options: "C270", "C922", or "Generic"
+# --- LOCATION CONFIGURATION ---
+
+CREDO_LAT="YOUR_LATITUDE" 
+CREDO_LNG="YOUR_LONGITUDE"
+CREDO_ALT="YOUR_ALTITUDE"
+
+# --- CAMERA SELECTION ---
+CREDO_CAMERA_MODEL="C270"  # Options: "C270", "C922", or "Generic"
+
+# --- HARDWARE & SOFTWARE CONFIGURATION ---
+CREDO_DEVICE_MODEL="RPi Model B"
+CREDO_SOFTWARE_VERSION="v1.2"
 ```
 
-### Option B: The Start Script (Recommended)
-Edit the included `start_CMOSmicRay.sh` file to save your credentials permanently:
-```bash
-nano start_CMOSmicRay.sh
-```
-You **must** provide your own values for the following variables to correctly identify your detector on the network:
+### Step 2: Customizing Variables
 * `CREDO_USER`: Your registered CREDO project username.
 * `CREDO_PASS`: Your CREDO project password.
 * `CREDO_STATION`: The name you want to assign to this specific detection station.
-* `CREDO_DEVICE_MODEL`: The specific hardware model of Raspberry Pi you are running this on (e.g., "RPi 4 Model B", "RPi Zero 2 W").
-
---- LOCATION CONFIGURATION ---
-* `CREDO_LAT`: Your Latitude
-* `CREDO_LNG`: Your Longitude
-* `CREDO_ALT`: Your Altitude
-
---- CAMERA SELECTION ---
-* `CREDO_CAMERA_MODEL`: "C270" or "C922" - The Python script automagically tunes the drivers
-
----HARDWARE & SOFTWARE CONFIGURATION ---
-* `CREDO_DEVICE_MODEL`: "RPi Model B"
-
-Update these export lines with your actual details, then save (`Ctrl+O`) and exit (`Ctrl+X`).
+* `CREDO_DEVICE_MODEL`: The hardware model (e.g., "RPi 4 Model B").
+* `CREDO_LAT`, `CREDO_LNG`, `CREDO_ALT`: Your GPS coordinates.
+* `CREDO_CAMERA_MODEL`: Choose between "C270" or "C922".
 
 ## 🚀 Usage
 
@@ -109,6 +113,13 @@ chmod +x start_CMOSmicRay.sh
 ./start_CMOSmicRay.sh
 ```
 
+### Stopping the Detector
+To safely shut down the background processes, release the camera hardware, and stop the dashboard server, use the stop script:
+```bash
+chmod +x stop_CMOSmicRay.sh
+./stop_CMOSmicRay.sh
+```
+
 ### The Dashboard
 To view your detections locally:
 1. Ensure the detection backend `CMOSmicRay.py` is running.
@@ -117,7 +128,10 @@ To view your detections locally:
 cd ~/CMOSmicRay
 python3 -m http.server 8000
 ```
-3. Open `http://<raspberry-pi-ip>:8000/dashboard.html` in your web browser.
+3. Open the dashboard in your web browser. You can access it using any of the following methods:
+   - **Working directly on the Raspberry Pi:** `http://127.0.0.1:8000/dashboard.html`
+   - **From another computer (via Hostname):** `http://raspberrypi.local:8000/dashboard.html` (change `raspberrypi` if you renamed your host)
+   - **From another computer (via IP Address):** `http://<raspberry-pi-ip>:8000/dashboard.html`
 
 ### Monitoring
 You can watch the logs in real-time to verify detections and system health:

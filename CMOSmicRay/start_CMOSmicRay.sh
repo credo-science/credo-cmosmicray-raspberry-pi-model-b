@@ -1,24 +1,9 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
-# --- USER CREDENTIALS ---
-# (Updated to match the credentials in your snippet)
-export CREDO_USER="YourUsername"
-export CREDO_PASS="YourPassword"
-export CREDO_STATION="YourStationName"
-
-# --- LOCATION CONFIGURATION ---
-export CREDO_LAT="YourLatitude"
-export CREDO_LNG="YourLongitude"
-export CREDO_ALT="YourAltitude"
-
-# --- CAMERA SELECTION ---
-# Set this to "C270" or "C922" - The Python script automagically tunes the drivers
-export CREDO_CAMERA_MODEL="C270"
-
-# --- HARDWARE & SOFTWARE CONFIGURATION ---
-export CREDO_DEVICE_MODEL="RPi Model B"
-export CREDO_SOFTWARE_VERSION="v1.0"
+# --- CONFIGURATION ---
+# Configuration and credentials are now loaded from the .env file in this directory.
+# Ensure you copy .env.example to .env and fill in your details.
 
 # --- PROCESS MANAGEMENT ---
 # Check if the new production script is already running
@@ -28,10 +13,19 @@ then
 else
     echo "[$(date)] Initializing CMOSmicRay..."
     
-    # Note: Hardware tuning (Exposure/Gain) is now handled internally by the Python script.
+    # Ensure dependencies are available
+    echo "[$(date)] Verifying python dependencies..."
+    if ! python3 -c "import websockets" &> /dev/null; then
+        echo "[$(date)] Installing websockets..."
+        sudo apt-get install -y python3-websockets || pip3 install websockets --break-system-packages
+    fi
+    if ! python3 -c "import dotenv" &> /dev/null; then
+        echo "[$(date)] Installing python-dotenv..."
+        sudo apt-get install -y python3-dotenv || pip3 install python-dotenv --break-system-packages
+    fi
     
     # Launch the script in the background using the variables above
-    nohup python3 CMOSmicRay.py >> CMOSmicRay.log 2>&1 &
+    nohup python3 -u CMOSmicRay.py >> CMOSmicRay.log 2>&1 &
     
     # Launch the Dashboard Web Server in the background
     if ! pgrep -f "http.server 8000" > /dev/null
