@@ -17,10 +17,12 @@ import subprocess
 import threading
 import sys
 import logging
+import logging.handlers
 import copy
 from datetime import datetime
 import asyncio
 import websockets
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from collections import deque
 from dotenv import load_dotenv
 
@@ -47,15 +49,22 @@ LOCAL_LOG_FILE = os.path.join(BASE_DIR, "detections.json")
 LOCAL_STATUS_FILE = os.path.join(BASE_DIR, "status.json")
 
 # --- HARDWARE PROFILES ---
+# threshold      : legacy absolute pixel-diff gate (kept for reference)
+# min_absolute   : hard minimum diff value to even consider a hit
+# ratio_threshold: adaptive gate — maxVal must be >= ratio_threshold * bg_brightness
+# ratio_min      : floor for the adaptive gate (ignores very dark backgrounds)
 HARDWARE_PROFILES = {
     "C270_FAMILY": {
-        "threshold": 60, "exposure": 1000, "gain": 255, "driver_quirk": "legacy"
+        "threshold": 60, "exposure": 1000, "gain": 255, "driver_quirk": "legacy",
+        "min_absolute": 60, "ratio_threshold": 3.5, "ratio_min": 45
     },
     "C922_FAMILY": {
-        "threshold": 95, "exposure": 150, "gain": 128, "driver_quirk": "standard"
+        "threshold": 95, "exposure": 150, "gain": 128, "driver_quirk": "standard",
+        "min_absolute": 95, "ratio_threshold": 4.0, "ratio_min": 70
     },
     "GENERIC": {
-        "threshold": 80, "exposure": 500, "gain": 150, "driver_quirk": "standard"
+        "threshold": 80, "exposure": 500, "gain": 150, "driver_quirk": "standard",
+        "min_absolute": 80, "ratio_threshold": 3.5, "ratio_min": 55
     }
 }
 
@@ -89,7 +98,7 @@ ALT = float(os.getenv("CREDO_ALT"))
 bg_frame = None; alpha = 0.01; current_token = None
 SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
 last_frame_time = time.time()
-data_cache = deque(maxlen=10000)
+data_cache = []          # Capped at 1000 entries; plain list for JSON serialisation
 connected_clients = set()
 
 # --- ATMOSPHERIC STATE ---
@@ -122,59 +131,134 @@ def get_pressure():
 def get_outdoor_temp():
     return cached_outdoor_temp
 
-def ws_thread_target():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def broadcast():
-        while True:
-            await asyncio.sleep(1)
+# --- DIAGNOSTIC TRACE LOGGER ---
+# Uses a RotatingFileHandler: max 2 MB per file, keeps 5 backups (~10 MB total).
+# CSV format so the data can be loaded directly into pandas / Excel for analysis.
+DIAG_LOG_FILE = os.path.join(BASE_DIR, "trace_diagnostics.csv")
+
+_diag_handler = logging.handlers.RotatingFileHandler(
+    DIAG_LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_diag_handler.setFormatter(logging.Formatter("%(message)s"))  # raw CSV rows
+
+diag_logger = logging.getLogger("TraceDiagnostics")
+diag_logger.setLevel(logging.INFO)
+diag_logger.addHandler(_diag_handler)
+diag_logger.propagate = False  # don't echo to the main console stream
+
+# Write CSV header only when the file is new / empty
+if not os.path.exists(DIAG_LOG_FILE) or os.path.getsize(DIAG_LOG_FILE) == 0:
+    diag_logger.info("timestamp_iso,status,max_val,bg_val,ratio,loc_x,loc_y,note")
+
+
+def log_trace_event(status, max_val, bg_val, coord, note=""):
+    """
+    Appends one CSV row to the rotating diagnostic log.
+    status: 'ACCEPTED' | 'REJECTED_SENSITIVITY' | 'REJECTED_SPATIAL'
+    """
+    ratio = (max_val / bg_val) if bg_val > 0 else float("inf")
+    row = (
+        f"{datetime.utcnow().isoformat()},"
+        f"{status},{int(max_val)},{int(bg_val)},{ratio:.2f},"
+        f"{coord[0]},{coord[1]},{note}"
+    )
+    diag_logger.info(row)
+
+
+def is_spatially_valid(diff_frame, x, y, peak_val):
+    """
+    Returns True if the 3x3 neighbourhood around (x, y) contains more than one
+    pixel above 50 % of the peak value — i.e. the hit is NOT an isolated hot pixel.
+    """
+    roi = diff_frame[max(0, y - 1):y + 2, max(0, x - 1):x + 2]
+    return int(np.sum(roi >= (peak_val * 0.5))) > 1
+
+# --- WEBSOCKET LOGIC (MODULE-LEVEL) ---
+
+async def handler(websocket):
+    """Handles the lifecycle of a single dashboard client connection."""
+    client_info = websocket.remote_address
+    connected_clients.add(websocket)
+    logging.info(f"[WS] Client connected: {client_info}")
+
+    try:
+        # Initial sync: send historical data and script start time
+        await websocket.send(json.dumps({
+            "type": "init",
+            "data": list(data_cache),
+            "script_start": SCRIPT_START
+        }))
+        # Keep connection alive; listen for any client messages
+        async for message in websocket:
+            pass
+
+    except (ConnectionClosedError, ConnectionClosedOK):
+        logging.info(f"[WS] Client {client_info} disconnected normally.")
+    except Exception as e:
+        logging.error(f"[WS] Error with client {client_info}: {e}")
+    finally:
+        connected_clients.discard(websocket)
+        logging.info(f"[WS] Client {client_info} removed from active set.")
+
+
+async def broadcast():
+    """Background task: push telemetry updates to all active dashboard clients."""
+    while True:
+        await asyncio.sleep(1)
+        try:
             now = time.time()
             sys_status = "SYSTEM_STALLED" if (now - last_frame_time > 5.0) else "OK"
-            
-            t_ms = int(now * 1000)
+
             payload = {
                 "type": "update",
-                "timestamp": t_ms,
+                "timestamp": int(now * 1000),
                 "temp": get_outdoor_temp() or 0.0,
                 "pressure": get_pressure() or 0.0,
                 "system_status": sys_status
             }
+
+            # Update cache and cap memory usage
             data_cache.append(payload)
-            
-            if connected_clients:
-                msg = json.dumps(payload)
-                for ws in list(connected_clients):
-                    try:
-                        await ws.send(msg)
-                    except:
-                        pass
-                        
-    async def handler(*args):
-        websocket = args[0]
-        connected_clients.add(websocket)
-        logging.info("[DASHBOARD] WebSocket Client Connected.")
+            if len(data_cache) > 1000:
+                data_cache.pop(0)
+
+            if not connected_clients:
+                continue
+
+            msg = json.dumps(payload)
+            # Broadcast guard: prune dead connections on send failure
+            for ws in list(connected_clients):
+                try:
+                    await ws.send(msg)
+                except (ConnectionClosedError, ConnectionClosedOK, Exception):
+                    connected_clients.discard(ws)
+
+        except Exception as e:
+            logging.error(f"[WS] Broadcast loop error: {e}")
+
+
+def ws_thread_target():
+    """Entry point for the dedicated WebSocket server thread."""
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
+
+    async def main_ws():
+        logging.info("[WS] Server starting on port 8001...")
+        broadcast_task = asyncio.create_task(broadcast())
         try:
-            await websocket.send(json.dumps({
-                "type": "init", 
-                "data": list(data_cache),
-                "script_start": SCRIPT_START
-            }))
-            async for _ in websocket: pass
-        except:
-            pass
+            async with websockets.serve(
+                handler, "0.0.0.0", 8001,
+                ping_interval=20,
+                ping_timeout=20
+            ):
+                await asyncio.Future()  # Run forever
         finally:
-            if websocket in connected_clients:
-                connected_clients.remove(websocket)
-            logging.info("[DASHBOARD] WebSocket Client Disconnected.")
+            broadcast_task.cancel()
 
-    async def main():
-        asyncio.create_task(broadcast())
-        # websockets.serve supports both single and double args depending on version
-        async with websockets.serve(handler, "0.0.0.0", 8001):
-            await asyncio.Future()
-
-    loop.run_until_complete(main())
+    try:
+        new_loop.run_until_complete(main_ws())
+    finally:
+        new_loop.close()
 
 def tune_driver():
     logging.info(f"[HARDWARE] Tuning {PROFILE_KEY} ({PROFILE['driver_quirk']})...")
@@ -412,18 +496,53 @@ if __name__ == "__main__":
     
     while True:
         ret, frame = cap.read()
-        if not ret: time.sleep(1); continue
-        
-        # Watchdog status update
+        if not ret:
+            time.sleep(1)
+            continue
+
+        # Watchdog: record frame arrival for SYSTEM_STALLED detection
         last_frame_time = time.time()
-        
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if bg_frame is None: bg_frame = gray.astype("float"); continue
+        if bg_frame is None:
+            bg_frame = gray.astype("float")
+            continue
+
         cv2.accumulateWeighted(gray, bg_frame, alpha)
         diff = cv2.absdiff(gray, cv2.convertScaleAbs(bg_frame))
         _, maxVal, _, maxLoc = cv2.minMaxLoc(diff)
-        
-        if maxVal > PROFILE['threshold']:
-            process_hit(diff, maxLoc[0], maxLoc[1], maxVal)
-            time.sleep(0.5)
+
+        x, y = maxLoc
+        bg_brightness = int(bg_frame[y, x])
+
+        # --- Gate 1: Sensitivity checks ---
+        # Absolute gate: raw diff must exceed the hard minimum for this sensor
+        cond_absolute = maxVal >= PROFILE['min_absolute']
+        # Adaptive gate: diff must be a significant multiple of local background
+        #   AND must clear the ratio floor (avoids false positives on dark frames)
+        cond_adaptive = (
+            maxVal >= PROFILE['ratio_threshold'] * bg_brightness
+            and maxVal >= PROFILE['ratio_min']
+        )
+        # Edge guard: ignore hits right on the frame border (driver artefacts)
+        cond_not_edge = (x > 0 and y > 0)
+
+        if (cond_absolute or cond_adaptive) and cond_not_edge:
+            # --- Gate 2: Spatial hardening — reject isolated hot pixels ---
+            if is_spatially_valid(diff, x, y, maxVal):
+                log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
+                process_hit(diff, x, y, maxVal)
+                time.sleep(0.5)          # brief cooldown after a confirmed hit
+            else:
+                log_trace_event(
+                    "REJECTED_SPATIAL", maxVal, bg_brightness, maxLoc,
+                    "Isolated pixel — failed 3x3 neighbourhood check"
+                )
+        elif maxVal > PROFILE['min_absolute'] * 0.7:
+            # Near-miss: reached 70 % of the absolute threshold — log for tuning
+            log_trace_event(
+                "REJECTED_SENSITIVITY", maxVal, bg_brightness, maxLoc,
+                "Near-miss (<threshold)"
+            )
+
         time.sleep(0.02)

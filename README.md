@@ -93,7 +93,7 @@ CREDO_CAMERA_MODEL="C270"  # Options: "C270", "C922", or "Generic"
 
 # --- HARDWARE & SOFTWARE CONFIGURATION ---
 CREDO_DEVICE_MODEL="RPi Model B"
-CREDO_SOFTWARE_VERSION="v1.2"
+CREDO_SOFTWARE_VERSION="v1.3"
 ```
 
 ### Step 2: Customizing Variables
