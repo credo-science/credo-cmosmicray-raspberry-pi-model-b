@@ -56,7 +56,7 @@ LOCAL_STATUS_FILE = os.path.join(BASE_DIR, "status.json")
 HARDWARE_PROFILES = {
     "C270_FAMILY": {
         "threshold": 60, "exposure": 1000, "gain": 255, "driver_quirk": "legacy",
-        "min_absolute": 60, "ratio_threshold": 3.5, "ratio_min": 45
+        "min_absolute": 70, "ratio_threshold": 3.5, "ratio_min": 45
     },
     "C922_FAMILY": {
         "threshold": 95, "exposure": 150, "gain": 128, "driver_quirk": "standard",
@@ -94,12 +94,31 @@ LAT = float(os.getenv("CREDO_LAT"))
 LNG = float(os.getenv("CREDO_LNG"))
 ALT = float(os.getenv("CREDO_ALT"))
 
+# --- CALIBRATION (PRD §1) ---
+CALIBRATION_FRAMES    = 500     # Minimum frames to establish noise floor before detection
+OBSCURATION_AVG_MAX   = 10      # PRD: average pixel brightness must be <= 10
+OBSCURATION_BLACK_MIN = 0.250   # Adjusted from 0.999 to handle high-gain sensor noise floor
+
+# --- THERMAL PROTECTION (PRD §2) ---
+THERMAL_CEILING_C      = 70.0   # PRD: exit if CPU temp exceeds this; systemd restarts the process
+THERMAL_CHECK_INTERVAL = 30     # Seconds between vcgencmd calls to limit subprocess overhead
+
 # --- STATE ---
 bg_frame = None; alpha = 0.01; current_token = None
 SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
 last_frame_time = time.time()
 data_cache = []          # Capped at 1000 entries; plain list for JSON serialisation
 connected_clients = set()
+
+# --- CALIBRATION STATE ---
+calibration_complete    = False
+calibration_frame_count = 0
+
+# --- THERMAL STATE ---
+last_thermal_check = 0.0
+
+# --- OBSCURATION STATE ---
+last_obscuration_check = time.time()
 
 # --- ATMOSPHERIC STATE ---
 cached_pressure = 1013.25 
@@ -173,6 +192,27 @@ def is_spatially_valid(diff_frame, x, y, peak_val):
     roi = diff_frame[max(0, y - 1):y + 2, max(0, x - 1):x + 2]
     return int(np.sum(roi >= (peak_val * 0.5))) > 1
 
+
+def check_obscuration(gray_frame):
+    """
+    PRD §1 — Sensor Obscuration Verification.
+    Returns True if the lens appears correctly covered (dark).
+    Thresholds:
+      • Average pixel brightness <= OBSCURATION_AVG_MAX  (10 / 255)
+      • Black pixel density     >= OBSCURATION_BLACK_MIN (999 per mille)
+    Called once at the end of calibration; caller must sys.exit(1) on False.
+    """
+    avg_brightness = float(np.mean(gray_frame))
+    black_ratio    = float(np.sum(gray_frame == 0)) / gray_frame.size
+    ok = (avg_brightness <= OBSCURATION_AVG_MAX) and (black_ratio >= OBSCURATION_BLACK_MIN)
+    if not ok:
+        logging.critical(
+            f"[OBSCURATION] FAIL — avg_brightness={avg_brightness:.2f} "
+            f"(limit <= {OBSCURATION_AVG_MAX}), "
+            f"black_density={black_ratio * 1000:.1f} per mille (limit >= 999)"
+        )
+    return ok
+
 # --- WEBSOCKET LOGIC (MODULE-LEVEL) ---
 
 async def handler(websocket):
@@ -214,7 +254,9 @@ async def broadcast():
                 "timestamp": int(now * 1000),
                 "temp": get_outdoor_temp() or 0.0,
                 "pressure": get_pressure() or 0.0,
-                "system_status": sys_status
+                "system_status": sys_status,
+                "calibrating": not calibration_complete,
+                "calibration_progress": calibration_frame_count if not calibration_complete else CALIBRATION_FRAMES
             }
 
             # Update cache and cap memory usage
@@ -437,7 +479,7 @@ def process_hit(frame, x, y, max_val):
     
     threading.Thread(target=upload_worker, args=(cloud_payload,)).start()
     threading.Thread(target=save_local_log, args=(local_payload,)).start()
-    logging.info(f"[HIT] Energy:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
+    logging.info(f"[HIT] Intensity:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
 
 def config_watcher():
     global CREDO_USER, CREDO_PASS, STATION_ID, DEVICE_MODEL, SOFTWARE_VERSION, LAT, LNG, ALT, current_token
@@ -503,46 +545,106 @@ if __name__ == "__main__":
         # Watchdog: record frame arrival for SYSTEM_STALLED detection
         last_frame_time = time.time()
 
+        # PRD §2: Thermal protection — exit and let systemd restart if CPU overheats
+        now_t = time.time()
+        if (now_t - last_thermal_check) >= THERMAL_CHECK_INTERVAL:
+            cpu_temp = get_temp()
+            last_thermal_check = now_t
+            if cpu_temp > THERMAL_CEILING_C:
+                logging.critical(
+                    f"[THERMAL] CPU temperature {cpu_temp}°C exceeds "
+                    f"{THERMAL_CEILING_C}°C ceiling. Halting for systemd restart."
+                )
+                sys.exit(1)
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Initialize background model on very first frame
         if bg_frame is None:
             bg_frame = gray.astype("float")
             continue
 
+        # Accumulate weighted background model every frame
         cv2.accumulateWeighted(gray, bg_frame, alpha)
-        diff = cv2.absdiff(gray, cv2.convertScaleAbs(bg_frame))
-        _, maxVal, _, maxLoc = cv2.minMaxLoc(diff)
 
-        x, y = maxLoc
-        bg_brightness = int(bg_frame[y, x])
+        # PRD §1: Calibration gate — hard block; no detection until 500 frames collected
+        if not calibration_complete:
+            calibration_frame_count += 1
+            if calibration_frame_count % 100 == 0:
+                logging.info(f"[CAL] Calibrating... {calibration_frame_count}/{CALIBRATION_FRAMES} frames")
+            if calibration_frame_count >= CALIBRATION_FRAMES:
+                logging.info("[CAL] 500 frames collected. Running obscuration verification...")
+                if not check_obscuration(gray):
+                    logging.critical(
+                        "[OBSCURATION] ABORT — Camera lens does not appear to be covered. "
+                        "Cover the lens completely and restart the application."
+                    )
+                    sys.exit(1)
+                calibration_complete = True
+                logging.info("[CAL] Calibration complete. Obscuration verified. Detection is now active.")
+                last_obscuration_check = time.time()  # Reset timer on successful calibration
+            continue  # Hard block: skip detection during calibration phase
 
-        # --- Gate 1: Sensitivity checks ---
-        # Absolute gate: raw diff must exceed the hard minimum for this sensor
-        cond_absolute = maxVal >= PROFILE['min_absolute']
-        # Adaptive gate: diff must be a significant multiple of local background
-        #   AND must clear the ratio floor (avoids false positives on dark frames)
-        cond_adaptive = (
-            maxVal >= PROFILE['ratio_threshold'] * bg_brightness
-            and maxVal >= PROFILE['ratio_min']
-        )
-        # Edge guard: ignore hits right on the frame border (driver artefacts)
-        cond_not_edge = (x > 0 and y > 0)
-
-        if (cond_absolute or cond_adaptive) and cond_not_edge:
-            # --- Gate 2: Spatial hardening — reject isolated hot pixels ---
-            if is_spatially_valid(diff, x, y, maxVal):
-                log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
-                process_hit(diff, x, y, maxVal)
-                time.sleep(0.5)          # brief cooldown after a confirmed hit
-            else:
-                log_trace_event(
-                    "REJECTED_SPATIAL", maxVal, bg_brightness, maxLoc,
-                    "Isolated pixel — failed 3x3 neighbourhood check"
+        # --- PERIODIC OBSCURATION CHECK (v1.5.0) ---
+        if (now_t - last_obscuration_check) >= 600:
+            last_obscuration_check = now_t
+            logging.info("[OBSCURATION] Performing periodic verification...")
+            if not check_obscuration(gray):
+                logging.critical(
+                    "[OBSCURATION] ABORT — Lens exposure detected mid-run! "
+                    "Cover the lens completely and restart the application."
                 )
-        elif maxVal > PROFILE['min_absolute'] * 0.7:
-            # Near-miss: reached 70 % of the absolute threshold — log for tuning
-            log_trace_event(
-                "REJECTED_SENSITIVITY", maxVal, bg_brightness, maxLoc,
-                "Near-miss (<threshold)"
+                sys.exit(1)
+
+        diff = cv2.absdiff(gray, cv2.convertScaleAbs(bg_frame))
+
+        # --- MULTI-TRACE DETECTION (Iterative Masking) ---
+        # Search for up to 3 separate traces in the same frame
+        hits_this_frame = 0
+        for _ in range(3):
+            _, maxVal, _, maxLoc = cv2.minMaxLoc(diff)
+            x, y = maxLoc
+            bg_brightness = int(bg_frame[y, x])
+
+            # Gate 1: Sensitivity checks
+            cond_absolute = maxVal >= PROFILE['min_absolute']
+            cond_adaptive = (
+                maxVal >= PROFILE['ratio_threshold'] * bg_brightness
+                and maxVal >= PROFILE['ratio_min']
             )
+            cond_not_edge = (x > 0 and y > 0)
+
+            if (cond_absolute or cond_adaptive) and cond_not_edge:
+                # Gate 2: Spatial hardening — reject isolated hot pixels
+                if is_spatially_valid(diff, x, y, maxVal):
+                    log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
+                    process_hit(diff, x, y, maxVal)
+                    hits_this_frame += 1
+
+                    # MASKING: Black out the 64x64 region to search for another trace
+                    # We ensure slices remain within frame boundaries
+                    hc = CROP_SIZE // 2
+                    y1, y2 = max(0, y - hc), min(CAPTURE_HEIGHT, y + hc)
+                    x1, x2 = max(0, x - hc), min(CAPTURE_WIDTH, x + hc)
+                    diff[y1:y2, x1:x2] = 0
+                else:
+                    log_trace_event(
+                        "REJECTED_SPATIAL", maxVal, bg_brightness, maxLoc,
+                        "Isolated pixel — masked and proceeding"
+                    )
+                    # Mask the isolated pixel too, so we don't find it again immediately
+                    diff[max(0, y-1):y+2, max(0, x-1):x+2] = 0
+            elif maxVal > PROFILE['min_absolute'] * 0.7:
+                # Near-miss: reached 70 % of the absolute threshold
+                log_trace_event(
+                    "REJECTED_SENSITIVITY", maxVal, bg_brightness, maxLoc,
+                    "Near-miss (<threshold)"
+                )
+                break  # No need to look for smaller hits if the brightest is a near-miss
+            else:
+                break  # Intensity too low to continue searching
+
+        if hits_this_frame > 0:
+            time.sleep(0.5)  # Single cooldown after finding at least one hit
 
         time.sleep(0.02)

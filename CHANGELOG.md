@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-05-02
+### Added
+- **Periodic Obscuration Check**: The system now runs a mid-run verification every 10 minutes to ensure the lens is still completely covered. If exposed, it aborts the process to protect the data stream.
+- **Scientific Terminology**: Renamed "Energy" to "Intensity" across logging and the UI to accurately reflect peak grayscale brightness (0-255).
+- **Dashboard Info Modal**: Added an interactive "Help" (`?`) modal to the dashboard to explain Grayscale Intensity, SCFA Sigma Levels, and Thermal/Obscuration Safety Guards.
+
+## [1.4.0] - 2026-05-02
+### Added
+- **Pre-Detection Calibration Phase**: Added a hard-block calibration gate that accumulates exactly 500 frames before enabling detection. Progress is logged every 100 frames (`[CAL]`). The `broadcast()` WebSocket payload now includes `calibrating` and `calibration_progress` fields so the dashboard can surface startup state.
+- **Sensor Obscuration Verification**: Added `check_obscuration()` which enforces both PRD thresholds on the final calibration frame — average brightness ≤ 10 and black pixel density ≥ 999 per mille. If the lens is not covered, the process aborts with `sys.exit(1)` and a `CRITICAL` log message.
+- **Thermal Protection Guard**: Wired the existing `get_temp()` (vcgencmd) into the main detection loop with a 30-second polling interval. If CPU temperature exceeds 70°C, the process exits via `sys.exit(1)`, allowing systemd to perform an automatic restart.
+
+## [1.3.1] - 2026-04-20
+### Added
+- **Multi-Trace Iterative Detection**: Enhanced the core detection loop to scan each frame for up to 3 independent particle traces. After identifying a peak, the system now "blacks out" the 64x64 region and re-runs the analysis to catch simultaneous cosmic ray events.
+- **Batched Cooldown Logic**: Refactored the 500ms API protection sleep to occur once per frame *after* all potential hits are processed, maximizing temporal resolution while maintaining system stability.
+
+
 ## [1.3.0] - 2026-04-14
 ### Added
 - **Diagnostic Trace Logger**: Implemented a rotating CSV logger (`trace_diagnostics.csv`) that securely records max value, background brightness, and ratios for accepted hits, spatial-rejections, and near-misses for future tuning.
