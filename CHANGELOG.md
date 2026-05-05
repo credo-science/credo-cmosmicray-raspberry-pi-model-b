@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-05-05
+### Added
+- **Per-Hit Obscuration Gate (Gold Standard)**: `check_obscuration()` now runs inside `process_hit()` before any upload is triggered. If the lens is exposed at the moment of detection, the hit is discarded and the process halts immediately — guaranteeing zero junk data ever reaches the CREDO API.
+- **Tiered Thermal Protection**: Added a `60°C` soft-warning tier (logs `WARNING`, keeps running) below the existing halt tier. The halt threshold is now user-configurable via `CREDO_THERMAL_CEILING` in `.env` (default: `70.0`), enabling operators on older/hotter hardware to tune it without touching source code.
+
 ## [1.5.0] - 2026-05-02
 ### Added
 - **Periodic Obscuration Check**: The system now runs a mid-run verification every 10 minutes to ensure the lens is still completely covered. If exposed, it aborts the process to protect the data stream.

@@ -100,7 +100,8 @@ OBSCURATION_AVG_MAX   = 10      # PRD: average pixel brightness must be <= 10
 OBSCURATION_BLACK_MIN = 0.250   # Adjusted from 0.999 to handle high-gain sensor noise floor
 
 # --- THERMAL PROTECTION (PRD §2) ---
-THERMAL_CEILING_C      = 70.0   # PRD: exit if CPU temp exceeds this; systemd restarts the process
+THERMAL_WARNING_C      = 60.0                                              # Log WARNING, keep running
+THERMAL_CEILING_C      = float(os.getenv("CREDO_THERMAL_CEILING", "70.0")) # HALT + systemd restart; user-configurable
 THERMAL_CHECK_INTERVAL = 30     # Seconds between vcgencmd calls to limit subprocess overhead
 
 # --- STATE ---
@@ -444,7 +445,16 @@ def save_local_log(payload):
     except Exception as e:
         logging.error(f"[LOCAL] Write Failed: {e}")
 
-def process_hit(frame, x, y, max_val):
+def process_hit(frame, gray, x, y, max_val):
+    # --- GOLD STANDARD GATE (v1.6.0): Validate obscuration on every hit ---
+    # Prevents any junk data from reaching the CREDO API if lens is exposed.
+    if not check_obscuration(gray):
+        logging.critical(
+            "[OBSCURATION] ABORT — Hit detected on an exposed frame. "
+            "Discarding hit and halting to prevent junk upload to CREDO API."
+        )
+        sys.exit(1)
+
     h, w = frame.shape
     hc = CROP_SIZE // 2
     sx, sy = max(0, min(x-hc, w-CROP_SIZE)), max(0, min(y-hc, h-CROP_SIZE))
@@ -545,17 +555,22 @@ if __name__ == "__main__":
         # Watchdog: record frame arrival for SYSTEM_STALLED detection
         last_frame_time = time.time()
 
-        # PRD §2: Thermal protection — exit and let systemd restart if CPU overheats
+        # PRD §2: Tiered thermal protection (v1.6.0)
         now_t = time.time()
         if (now_t - last_thermal_check) >= THERMAL_CHECK_INTERVAL:
             cpu_temp = get_temp()
             last_thermal_check = now_t
             if cpu_temp > THERMAL_CEILING_C:
                 logging.critical(
-                    f"[THERMAL] CPU temperature {cpu_temp}°C exceeds "
-                    f"{THERMAL_CEILING_C}°C ceiling. Halting for systemd restart."
+                    f"[THERMAL] HALT — CPU {cpu_temp}°C exceeds ceiling of {THERMAL_CEILING_C}°C. "
+                    f"Halting for systemd restart."
                 )
                 sys.exit(1)
+            elif cpu_temp > THERMAL_WARNING_C:
+                logging.warning(
+                    f"[THERMAL] WARNING — CPU {cpu_temp}°C exceeds soft limit of {THERMAL_WARNING_C}°C. "
+                    f"Continuing operation."
+                )
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -618,7 +633,7 @@ if __name__ == "__main__":
                 # Gate 2: Spatial hardening — reject isolated hot pixels
                 if is_spatially_valid(diff, x, y, maxVal):
                     log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
-                    process_hit(diff, x, y, maxVal)
+                    process_hit(diff, gray, x, y, maxVal)
                     hits_this_frame += 1
 
                     # MASKING: Black out the 64x64 region to search for another trace
