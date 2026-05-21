@@ -45,8 +45,9 @@ DEVICE_MODEL = os.getenv("CREDO_DEVICE_MODEL")
 SOFTWARE_VERSION = os.getenv("CREDO_SOFTWARE_VERSION")
 CREDO_PASS = os.getenv("CREDO_PASS")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_LOG_FILE = os.path.join(BASE_DIR, "detections.json") 
-LOCAL_STATUS_FILE = os.path.join(BASE_DIR, "status.json")
+LOCAL_LOG_FILE     = os.path.join(BASE_DIR, "detections.json")
+LOCAL_ARCHIVE_FILE = os.path.join(BASE_DIR, "detections_archive.jsonl")  # append-only; never truncated
+LOCAL_STATUS_FILE  = os.path.join(BASE_DIR, "status.json")
 
 # --- HARDWARE PROFILES ---
 # threshold      : legacy absolute pixel-diff gate (kept for reference)
@@ -87,22 +88,24 @@ PING_URL = f"{CREDO_BASE_URL}/ping"
 DETECT_URL = f"{CREDO_BASE_URL}/detection"
 
 # --- SETTINGS ---
-CAMERA_INDEX = 0
-CAPTURE_WIDTH = 1280; CAPTURE_HEIGHT = 720; CROP_SIZE = 64
-PING_INTERVAL = 600
+CAMERA_INDEX   = int(os.getenv("CAMERA_INDEX",   "0"))
+CAPTURE_WIDTH  = int(os.getenv("CAPTURE_WIDTH",  "640"))
+CAPTURE_HEIGHT = int(os.getenv("CAPTURE_HEIGHT", "480"))
+CROP_SIZE      = int(os.getenv("CROP_SIZE",      "64"))
+PING_INTERVAL  = int(os.getenv("PING_INTERVAL",  "600"))
 LAT = float(os.getenv("CREDO_LAT"))
 LNG = float(os.getenv("CREDO_LNG"))
 ALT = float(os.getenv("CREDO_ALT"))
 
 # --- CALIBRATION (PRD §1) ---
-CALIBRATION_FRAMES    = 500     # Minimum frames to establish noise floor before detection
-OBSCURATION_AVG_MAX   = 10      # PRD: average pixel brightness must be <= 10
-OBSCURATION_BLACK_MIN = 0.250   # Adjusted from 0.999 to handle high-gain sensor noise floor
+CALIBRATION_FRAMES    = int(float(os.getenv("CALIBRATION_FRAMES",    "500")))   # Minimum frames to establish noise floor before detection
+OBSCURATION_AVG_MAX   = float(os.getenv("OBSCURATION_AVG_MAX",        "10"))     # PRD: average pixel brightness must be <= 10
+OBSCURATION_BLACK_MIN = float(os.getenv("OBSCURATION_BLACK_MIN",      "0.050"))  # Lowered to 5% to handle high-gain sensor noise floor
 
 # --- THERMAL PROTECTION (PRD §2) ---
-THERMAL_WARNING_C      = 60.0                                              # Log WARNING, keep running
-THERMAL_CEILING_C      = float(os.getenv("CREDO_THERMAL_CEILING", "70.0")) # HALT + systemd restart; user-configurable
-THERMAL_CHECK_INTERVAL = 30     # Seconds between vcgencmd calls to limit subprocess overhead
+THERMAL_CEILING_C      = float(os.getenv("THERMAL_CEILING_C",         "70.0"))  # PRD: exit if CPU temp exceeds this; systemd restarts the process
+THERMAL_CHECK_INTERVAL = int(float(os.getenv("THERMAL_CHECK_INTERVAL", "30")))  # Seconds between vcgencmd calls to limit subprocess overhead
+
 
 # --- STATE ---
 bg_frame = None; alpha = 0.01; current_token = None
@@ -110,6 +113,7 @@ SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
 last_frame_time = time.time()
 data_cache = []          # Capped at 1000 entries; plain list for JSON serialisation
 connected_clients = set()
+recent_alerts = deque(maxlen=2)  # Keeps the last 2 CRITICAL alert messages for dashboard display
 
 # --- CALIBRATION STATE ---
 calibration_complete    = False
@@ -204,15 +208,43 @@ def check_obscuration(gray_frame):
     Called once at the end of calibration; caller must sys.exit(1) on False.
     """
     avg_brightness = float(np.mean(gray_frame))
-    black_ratio    = float(np.sum(gray_frame == 0)) / gray_frame.size
+    # Count pixels <= 3 to handle the noise floor of older USB sensors
+    black_ratio    = float(np.sum(gray_frame <= 5)) / gray_frame.size
     ok = (avg_brightness <= OBSCURATION_AVG_MAX) and (black_ratio >= OBSCURATION_BLACK_MIN)
     if not ok:
-        logging.critical(
+        msg1 = (
             f"[OBSCURATION] FAIL — avg_brightness={avg_brightness:.2f} "
             f"(limit <= {OBSCURATION_AVG_MAX}), "
-            f"black_density={black_ratio * 1000:.1f} per mille (limit >= 999)"
+            f"black_density={black_ratio * 1000:.1f} per mille (limit >= {OBSCURATION_BLACK_MIN * 1000:.0f})"
         )
+        logging.critical(msg1)
+        recent_alerts.append(msg1)
     return ok
+
+def push_alert(level: str, lines: list):
+    """
+    Thread-safe helper called from the main loop or sub-threads to push a
+    CRITICAL alert to all connected dashboard clients.  Because the WebSocket
+    event loop lives on a separate thread we schedule the coroutine onto it
+    with asyncio.run_coroutine_threadsafe().
+    """
+    global _ws_event_loop
+    if _ws_event_loop is None:
+        return
+    payload = json.dumps({
+        "type": "alert",
+        "level": level,
+        "lines": lines,
+        "timestamp": int(time.time() * 1000)
+    })
+    async def _send():
+        for ws in list(connected_clients):
+            try:
+                await ws.send(payload)
+            except Exception:
+                connected_clients.discard(ws)
+    asyncio.run_coroutine_threadsafe(_send(), _ws_event_loop)
+
 
 # --- WEBSOCKET LOGIC (MODULE-LEVEL) ---
 
@@ -280,10 +312,15 @@ async def broadcast():
             logging.error(f"[WS] Broadcast loop error: {e}")
 
 
+_ws_event_loop = None  # Set by ws_thread_target so push_alert() can schedule onto it
+
+
 def ws_thread_target():
     """Entry point for the dedicated WebSocket server thread."""
+    global _ws_event_loop
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
+    _ws_event_loop = new_loop
 
     async def main_ws():
         logging.info("[WS] Server starting on port 8001...")
@@ -428,33 +465,56 @@ def upload_worker(payload):
         logging.error(f"[UPLOAD] Cloud Error: {e}")
 
 def save_local_log(payload):
+    """
+    Persists a detection to two stores:
+
+    1. detections_archive.jsonl  — append-only JSONL, metadata only (no image),
+       never truncated.  Safe against power-loss because each record is a single
+       atomic line-append; even a partial write leaves all previous lines intact.
+
+    2. detections.json           — rolling cache of the last 1 000 full records
+       (including the base-64 image) for the dashboard gallery.  Written
+       atomically via a temp-file + os.replace() so a crash mid-write cannot
+       corrupt the file.
+    """
     try:
         detection_data = payload["detections"][0]
+
+        # ── 1. Append-only archive (metadata; no image) ──────────────────────
+        archive_record = {
+            "timestamp":    detection_data["timestamp"],
+            "x":            detection_data["x"],
+            "y":            detection_data["y"],
+            "max":          detection_data["max"],
+            "pressure":     detection_data.get("pressure"),
+            "outdoor_temp": detection_data.get("outdoor_temp"),
+            "camera_model": detection_data.get("camera_model"),
+        }
+        with open(LOCAL_ARCHIVE_FILE, "a", encoding="utf-8") as af:
+            af.write(json.dumps(archive_record) + "\n")
+
+        # ── 2. Rolling display cache (atomic write) ──────────────────────────
         data_list = []
         if os.path.exists(LOCAL_LOG_FILE):
             try:
                 with open(LOCAL_LOG_FILE, 'r') as f:
                     data_list = json.load(f)
-                    if len(data_list) > 1000: data_list = data_list[-1000:] 
-            except json.JSONDecodeError: data_list = []
+                    if len(data_list) > 1000:
+                        data_list = data_list[-1000:]
+            except json.JSONDecodeError:
+                data_list = []
 
         data_list.append(detection_data)
-        with open(LOCAL_LOG_FILE, 'w') as f:
+        tmp_path = LOCAL_LOG_FILE + ".tmp"
+        with open(tmp_path, 'w') as f:
             json.dump(data_list, f, indent=4)
-        logging.info(f"[LOCAL] Saved for Dashboard.")
+        os.replace(tmp_path, LOCAL_LOG_FILE)  # atomic on POSIX
+
+        logging.info(f"[LOCAL] Saved for Dashboard. Archive total: ~{detection_data['timestamp']}")
     except Exception as e:
         logging.error(f"[LOCAL] Write Failed: {e}")
 
-def process_hit(frame, gray, x, y, max_val):
-    # --- GOLD STANDARD GATE (v1.6.0): Validate obscuration on every hit ---
-    # Prevents any junk data from reaching the CREDO API if lens is exposed.
-    if not check_obscuration(gray):
-        logging.critical(
-            "[OBSCURATION] ABORT — Hit detected on an exposed frame. "
-            "Discarding hit and halting to prevent junk upload to CREDO API."
-        )
-        sys.exit(1)
-
+def process_hit(frame, x, y, max_val):
     h, w = frame.shape
     hc = CROP_SIZE // 2
     sx, sy = max(0, min(x-hc, w-CROP_SIZE)), max(0, min(y-hc, h-CROP_SIZE))
@@ -555,22 +615,20 @@ if __name__ == "__main__":
         # Watchdog: record frame arrival for SYSTEM_STALLED detection
         last_frame_time = time.time()
 
-        # PRD §2: Tiered thermal protection (v1.6.0)
+        # PRD §2: Thermal protection — exit and let systemd restart if CPU overheats
         now_t = time.time()
         if (now_t - last_thermal_check) >= THERMAL_CHECK_INTERVAL:
             cpu_temp = get_temp()
             last_thermal_check = now_t
             if cpu_temp > THERMAL_CEILING_C:
-                logging.critical(
-                    f"[THERMAL] HALT — CPU {cpu_temp}°C exceeds ceiling of {THERMAL_CEILING_C}°C. "
-                    f"Halting for systemd restart."
+                thermal_msg = (
+                    f"[THERMAL] CPU temperature {cpu_temp}°C exceeds "
+                    f"{THERMAL_CEILING_C}°C ceiling. Halting for systemd restart."
                 )
+                logging.critical(thermal_msg)
+                recent_alerts.append(thermal_msg)
+                push_alert("CRITICAL", list(recent_alerts))
                 sys.exit(1)
-            elif cpu_temp > THERMAL_WARNING_C:
-                logging.warning(
-                    f"[THERMAL] WARNING — CPU {cpu_temp}°C exceeds soft limit of {THERMAL_WARNING_C}°C. "
-                    f"Continuing operation."
-                )
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -590,10 +648,13 @@ if __name__ == "__main__":
             if calibration_frame_count >= CALIBRATION_FRAMES:
                 logging.info("[CAL] 500 frames collected. Running obscuration verification...")
                 if not check_obscuration(gray):
-                    logging.critical(
+                    msg2 = (
                         "[OBSCURATION] ABORT — Camera lens does not appear to be covered. "
                         "Cover the lens completely and restart the application."
                     )
+                    logging.critical(msg2)
+                    recent_alerts.append(msg2)
+                    push_alert("CRITICAL", list(recent_alerts))
                     sys.exit(1)
                 calibration_complete = True
                 logging.info("[CAL] Calibration complete. Obscuration verified. Detection is now active.")
@@ -605,10 +666,13 @@ if __name__ == "__main__":
             last_obscuration_check = now_t
             logging.info("[OBSCURATION] Performing periodic verification...")
             if not check_obscuration(gray):
-                logging.critical(
+                msg_mid = (
                     "[OBSCURATION] ABORT — Lens exposure detected mid-run! "
                     "Cover the lens completely and restart the application."
                 )
+                logging.critical(msg_mid)
+                recent_alerts.append(msg_mid)
+                push_alert("CRITICAL", list(recent_alerts))
                 sys.exit(1)
 
         diff = cv2.absdiff(gray, cv2.convertScaleAbs(bg_frame))
@@ -633,7 +697,7 @@ if __name__ == "__main__":
                 # Gate 2: Spatial hardening — reject isolated hot pixels
                 if is_spatially_valid(diff, x, y, maxVal):
                     log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
-                    process_hit(diff, gray, x, y, maxVal)
+                    process_hit(diff, x, y, maxVal)
                     hits_this_frame += 1
 
                     # MASKING: Black out the 64x64 region to search for another trace
