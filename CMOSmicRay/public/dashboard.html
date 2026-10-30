@@ -1,0 +1,1482 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description"
+        content="CMOSmicRay — Real-time cosmic ray monitoring dashboard for the CREDO Project citizen science network.">
+    <title id="page-title">Loading Station...</title>
+    <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230f1115'/%3E%3Cline x1='6' y1='26' x2='26' y2='6' stroke='%233b82f6' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='22' cy='10' r='3.5' fill='%2310b981'/%3E%3C/svg%3E">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+    <style>
+        /* ═══════════════════════════════════════════
+           DESIGN TOKENS
+        ═══════════════════════════════════════════ */
+        :root {
+            --bg:         #08090e;
+            --bg-alt:     #0b0d13;
+            --card:       #0d1019;
+            --card-hi:    #111622;
+            --sidebar-bg: #090b11;
+            --text:       #dde3ed;
+            --text-dim:   #8896ae;
+            --text-faint: #4a5568;
+            --border:     #192030;
+            --border-hi:  #243048;
+            --accent:     #3b82f6;
+            --accent-dim: rgba(59, 130, 246, 0.1);
+            --good:       #10b981;
+            --good-dim:   rgba(16, 185, 129, 0.1);
+            --warn:       #f59e0b;
+            --warn-dim:   rgba(245, 158, 11, 0.1);
+            --crit:       #ef4444;
+            --crit-dim:   rgba(239, 68, 68, 0.1);
+            --topbar-h:   64px;
+            --sidebar-w:  272px;
+            --radius:     10px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 13.5px;
+            line-height: 1.55;
+        }
+
+        /* ═══════════════════════════════════════════
+           TOP BAR
+        ═══════════════════════════════════════════ */
+        .topbar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: var(--topbar-h);
+            z-index: 200;
+            background: linear-gradient(90deg, #080b15 0%, #0c1122 50%, #080b15 100%);
+            border-bottom: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        #hdr-canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0.55;
+        }
+
+        .topbar-inner {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 100%;
+            padding: 0 28px;
+            gap: 20px;
+        }
+
+        .topbar-left {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            min-width: 0;
+        }
+
+        .topbar-icon {
+            font-size: 1.6rem;
+            line-height: 1;
+            color: var(--accent);
+            text-shadow: 0 0 16px rgba(59, 130, 246, 0.7);
+            flex-shrink: 0;
+            user-select: none;
+        }
+
+        .topbar-title-block h1 {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: 0.03em;
+            white-space: nowrap;
+            text-shadow: 0 0 24px rgba(59, 130, 246, 0.35);
+        }
+
+        .topbar-sub {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.63rem;
+            color: var(--accent);
+            letter-spacing: 0.09em;
+            margin-top: 2px;
+            white-space: nowrap;
+            opacity: 0.8;
+        }
+
+        .topbar-right {
+            display: flex;
+            align-items: center;
+            gap: 26px;
+            flex-shrink: 0;
+        }
+
+        .live-clock {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.88rem;
+            font-weight: 500;
+            color: var(--text-dim);
+            letter-spacing: 0.06em;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 5px 12px;
+        }
+
+        .topbar-meta-block {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.68rem;
+            color: var(--text-dim);
+            text-align: right;
+            line-height: 1.9;
+        }
+
+        .op-name { color: var(--text); font-weight: 500; }
+
+        .status-dot {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            margin-right: 6px;
+            background: var(--good);
+            animation: breathe 2.6s ease-in-out infinite;
+        }
+
+        @keyframes breathe {
+            0%, 100% { box-shadow: 0 0 4px 1px var(--good); opacity: 1; }
+            50%       { box-shadow: 0 0 10px 4px var(--good); opacity: 0.75; }
+        }
+
+        .status-text          { font-weight: 600; }
+        .status-text.good     { color: var(--good); }
+        .status-text.crit     { color: var(--crit); }
+
+        /* ═══════════════════════════════════════════
+           APP BODY
+        ═══════════════════════════════════════════ */
+        .app-body {
+            position: fixed;
+            top: var(--topbar-h);
+            left: 0; right: 0; bottom: 0;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* ═══════════════════════════════════════════
+           SIDEBAR
+        ═══════════════════════════════════════════ */
+        .sidebar {
+            width: var(--sidebar-w);
+            flex-shrink: 0;
+            height: 100%;
+            overflow-y: auto;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
+            padding: 20px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-hi) transparent;
+        }
+
+        .sidebar::-webkit-scrollbar       { width: 4px; }
+        .sidebar::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+        .sb-block {
+            padding: 18px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sb-block:last-child { border-bottom: none; }
+
+        .sb-label {
+            font-size: 0.6rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.4px;
+            color: var(--text-faint);
+            margin-bottom: 10px;
+            padding-left: 10px;
+            border-left: 2px solid var(--border-hi);
+        }
+
+        .accent-block .sb-label { border-left-color: var(--accent); color: var(--accent); }
+        .env-block    .sb-label { border-left-color: var(--good); }
+
+        .sb-count {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 2.6rem;
+            font-weight: 500;
+            color: #fff;
+            line-height: 1;
+            padding-left: 2px;
+        }
+
+        .accent-count { color: var(--accent); font-size: 2.2rem; }
+
+        /* Daily breakdown */
+        .daily-breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin-top: 4px;
+        }
+
+        .daily-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 5px 8px;
+            border-radius: 5px;
+            position: relative;
+            overflow: hidden;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.7rem;
+        }
+
+        .daily-bar {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            background: var(--accent-dim);
+            border-radius: 5px;
+            transition: width 0.7s ease;
+            pointer-events: none;
+        }
+
+        .daily-row .day   { color: var(--text-dim); position: relative; z-index: 1; }
+        .daily-row .count { color: #fff; font-weight: 500; position: relative; z-index: 1; }
+
+        /* Environmental */
+        .env-row {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            padding: 5px 0;
+            border-bottom: 1px solid var(--border);
+            line-height: 1.55;
+            word-break: break-word;
+        }
+
+        .env-row:last-child { border-bottom: none; }
+
+        /* ═══════════════════════════════════════════
+           MAIN CONTENT
+        ═══════════════════════════════════════════ */
+        .main-content {
+            flex: 1;
+            height: 100%;
+            overflow-y: auto;
+            padding: 22px 26px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-hi) transparent;
+        }
+
+        .main-content::-webkit-scrollbar       { width: 4px; }
+        .main-content::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+        /* ═══════════════════════════════════════════
+           PANEL (generic card)
+        ═══════════════════════════════════════════ */
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 22px 24px;
+            animation: fadeSlideUp 0.45s ease both;
+        }
+
+        .panel:nth-child(2) { animation-delay: 0.08s; }
+        .panel:nth-child(3) { animation-delay: 0.15s; }
+        .panel:nth-child(4) { animation-delay: 0.22s; }
+
+        @keyframes fadeSlideUp {
+            from { opacity: 0; transform: translateY(14px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .panel-hdr {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .panel-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.1px;
+            color: var(--text-dim);
+        }
+
+        .panel-sub {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.63rem;
+            color: var(--text-faint);
+        }
+
+        /* ═══════════════════════════════════════════
+           SCFA HERO
+        ═══════════════════════════════════════════ */
+        .scfa-hero {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--border-hi);
+            border-radius: var(--radius);
+            padding: 22px 24px 18px;
+            transition: border-left-color 0.5s ease, background 0.5s ease;
+            animation: fadeSlideUp 0.45s ease both;
+        }
+
+        .scfa-hero[data-status="good"] {
+            border-left-color: var(--good);
+            background: linear-gradient(105deg, var(--good-dim) 0%, var(--card) 38%);
+        }
+
+        .scfa-hero[data-status="warn"] {
+            border-left-color: var(--warn);
+            background: linear-gradient(105deg, var(--warn-dim) 0%, var(--card) 38%);
+        }
+
+        .scfa-hero[data-status="crit"] {
+            border-left-color: var(--crit);
+            background: linear-gradient(105deg, var(--crit-dim) 0%, var(--card) 38%);
+        }
+
+        .scfa-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 28px;
+            flex-wrap: wrap;
+        }
+
+        .scfa-head { flex: 1; min-width: 200px; }
+
+        .scfa-title-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+
+        .scfa-eyebrow {
+            font-size: 0.6rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.4px;
+            color: var(--text-faint);
+        }
+
+        .info-dot {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            border: 1px solid var(--text-faint);
+            color: var(--text-faint);
+            font-size: 0.6rem;
+            font-family: 'Roboto Mono', monospace;
+            cursor: default;
+            flex-shrink: 0;
+        }
+
+        .scfa-badge-wrap { margin-bottom: 12px; }
+
+        #scfa-badge {
+            display: inline-block;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            padding: 9px 26px;
+            border-radius: 7px;
+            border: 1.5px solid var(--text-faint);
+            color: var(--text-faint);
+            background: rgba(0, 0, 0, 0.3);
+            transition: color 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
+        }
+
+        #scfa-badge.status-good {
+            color: var(--good);
+            border-color: var(--good);
+            box-shadow: 0 0 22px -4px rgba(16, 185, 129, 0.55);
+        }
+
+        #scfa-badge.status-warn {
+            color: var(--warn);
+            border-color: var(--warn);
+            box-shadow: 0 0 22px -4px rgba(245, 158, 11, 0.55);
+        }
+
+        #scfa-badge.status-crit {
+            color: var(--crit);
+            border-color: var(--crit);
+            animation: pulse-crit 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse-crit {
+            0%, 100% { box-shadow: 0 0 18px -4px rgba(239, 68, 68, 0.5); }
+            50%       { box-shadow: 0 0 36px 4px rgba(239, 68, 68, 0.7); }
+        }
+
+        .scfa-desc-text {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            line-height: 1.5;
+        }
+
+        /* SCFA stats box */
+        .scfa-stats {
+            display: flex;
+            align-items: center;
+            background: var(--bg-alt);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 22px;
+            min-width: 280px;
+            flex: 0 0 auto;
+            align-self: flex-start;
+            gap: 0;
+        }
+
+        .scfa-stat { flex: 1; text-align: center; padding: 0 14px; }
+
+        .scfa-stat-div {
+            width: 1px;
+            height: 40px;
+            background: var(--border-hi);
+            flex-shrink: 0;
+        }
+
+        .scfa-stat-label {
+            font-size: 0.57rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.3px;
+            color: var(--text-faint);
+            margin-bottom: 6px;
+        }
+
+        .scfa-stat-val {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: #fff;
+            line-height: 1;
+        }
+
+        .scfa-unit {
+            font-size: 0.62rem;
+            color: var(--text-dim);
+            font-weight: 400;
+        }
+
+        /* SCFA legend bar */
+        .scfa-legend {
+            display: flex;
+            gap: 28px;
+            margin-top: 18px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .legend-item.good .legend-dot { background: var(--good); box-shadow: 0 0 6px var(--good); }
+        .legend-item.warn .legend-dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+        .legend-item.crit .legend-dot { background: var(--crit); box-shadow: 0 0 6px var(--crit); }
+        .legend-item.good b { color: var(--good); }
+        .legend-item.warn b { color: var(--warn); }
+        .legend-item.crit b { color: var(--crit); }
+
+        /* ═══════════════════════════════════════════
+           CHARTS
+        ═══════════════════════════════════════════ */
+        .chart-wrap { position: relative; }
+
+        .chart-fallback {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-faint);
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.75rem;
+            border: 1px dashed var(--border-hi);
+            border-radius: 6px;
+        }
+
+        /* ═══════════════════════════════════════════
+           DETECTION RATE GRID
+        ═══════════════════════════════════════════ */
+        .rate-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+
+        .rate-item {
+            background: var(--bg-alt);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 18px;
+            transition: border-color 0.25s, transform 0.2s;
+        }
+
+        .rate-item:hover {
+            border-color: var(--border-hi);
+            transform: translateY(-1px);
+        }
+
+        .rate-label {
+            font-size: 0.6rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.1px;
+            color: var(--text-faint);
+            margin-bottom: 8px;
+        }
+
+        .rate-val {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 1.9rem;
+            font-weight: 500;
+            color: #fff;
+            line-height: 1;
+        }
+
+        .rolling-section {
+            margin-top: 20px;
+            padding-top: 18px;
+            border-top: 1px solid var(--border);
+        }
+
+        .rolling-label {
+            font-size: 0.6rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.1px;
+            color: var(--text-faint);
+            margin-bottom: 14px;
+        }
+
+        /* ═══════════════════════════════════════════
+           PARTICLE GALLERY
+        ═══════════════════════════════════════════ */
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+            gap: 14px;
+        }
+
+        .gallery-empty {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 44px;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.78rem;
+            color: var(--text-faint);
+            border: 1px dashed var(--border-hi);
+            border-radius: 8px;
+        }
+
+        .hit-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .hit-card:hover {
+            transform: scale(1.04) translateY(-2px);
+            border-color: rgba(56, 200, 255, 0.45);
+            box-shadow: 0 4px 20px -6px rgba(56, 200, 255, 0.3);
+        }
+
+        .hit-card img {
+            width: 100%;
+            height: 145px;
+            object-fit: cover;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .hit-info {
+            padding: 8px 10px;
+            font-size: 0.63rem;
+            font-family: 'Roboto Mono', monospace;
+            color: var(--text-dim);
+            background: rgba(0,0,0,0.25);
+        }
+
+        /* ═══════════════════════════════════════════
+           MODAL
+        ═══════════════════════════════════════════ */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.93);
+            justify-content: center;
+            align-items: center;
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            max-width: 90%;
+            max-height: 88%;
+            border: 1.5px solid var(--accent);
+            box-shadow: 0 0 50px rgba(59, 130, 246, 0.25);
+            border-radius: 5px;
+            image-rendering: pixelated;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 20px;
+            right: 26px;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #fff;
+            font-size: 1rem;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .modal-close:hover { background: rgba(255, 255, 255, 0.16); }
+
+        /* ═══════════════════════════════════════════
+           SKELETON
+        ═══════════════════════════════════════════ */
+        .skeleton { color: var(--text-faint) !important; }
+
+        /* ═══════════════════════════════════════════
+           RESPONSIVE
+        ═══════════════════════════════════════════ */
+        @media (max-width: 900px) {
+            html, body { overflow: auto; height: auto; }
+
+            .app-body {
+                position: static;
+                flex-direction: column;
+                height: auto;
+                overflow: visible;
+            }
+
+            .sidebar {
+                width: 100%;
+                height: auto;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .sb-block { flex: 1; min-width: 140px; padding: 14px; border-bottom: none; border-right: 1px solid var(--border); }
+            .sb-block:last-child { border-right: none; }
+
+            .main-content { height: auto; overflow: visible; padding: 14px; }
+
+            .rate-grid { grid-template-columns: repeat(2, 1fr); }
+
+            .scfa-top { flex-direction: column; }
+            .scfa-stats { min-width: unset; width: 100%; }
+
+            .topbar-inner { padding: 0 16px; }
+            .live-clock { display: none; }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ─── TOP BAR ──────────────────────────────────── -->
+    <header class="topbar">
+        <canvas id="hdr-canvas"></canvas>
+        <div class="topbar-inner">
+            <div class="topbar-left">
+                <div class="topbar-icon">⚛</div>
+                <div class="topbar-title-block">
+                    <h1 id="observatory-name">Loading Observatory...</h1>
+                    <div class="topbar-sub">
+                        <span id="station-name-display">Loading Station...</span>&nbsp;·&nbsp;GEOPHYSICAL RESEARCH STREAM
+                    </div>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <div id="live-clock" class="live-clock">00:00:00 UTC</div>
+                <div class="topbar-meta-block">
+                    <div>OPERATOR&nbsp;<span id="operator-name-display" class="op-name">—</span></div>
+                    <div>
+                        <span class="status-dot" id="sys-status-dot"></span>
+                        <span id="sys-status" class="status-text good">CONNECTED</span>
+                    </div>
+                    <div id="data-stale-warning" class="status-text crit" style="display:none;">⚠ DATA STALE</div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- ─── APP BODY ─────────────────────────────────── -->
+    <div class="app-body">
+
+        <!-- SIDEBAR -->
+        <aside class="sidebar">
+
+            <div class="sb-block">
+                <div class="sb-label">Lifetime Detections</div>
+                <div class="sb-count skeleton" id="det-count">—</div>
+            </div>
+
+            <div class="sb-block accent-block">
+                <div class="sb-label">7-Day Flux Count</div>
+                <div class="sb-count accent-count skeleton" id="weekly-count">—</div>
+            </div>
+
+            <div class="sb-block">
+                <div class="sb-label">Daily Breakdown</div>
+                <div id="daily-breakdown" class="daily-breakdown"></div>
+            </div>
+
+            <div class="sb-block env-block">
+                <div class="sb-label">Environmental</div>
+                <div id="solar-val" class="env-row">☀ Solar Flare: Loading...</div>
+                <div id="outdoor-temp" class="env-row">🌡 Outdoor: Loading...</div>
+                <div id="env-metrics" class="env-row">Loading pressure...</div>
+            </div>
+
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="main-content">
+
+            <!-- SCFA Hero ──────────────────────────────── -->
+            <section class="scfa-hero" id="scfa-hero-panel">
+                <div class="scfa-top">
+                    <div class="scfa-head">
+                        <div class="scfa-title-row">
+                            <span class="scfa-eyebrow">SCFA — Statistical Cosmic Flux Anomaly</span>
+                            <span class="info-dot"
+                                title="Compares the current detection rate against this station's historical baseline (mean ± standard deviation).">?</span>
+                        </div>
+                        <div class="scfa-badge-wrap">
+                            <div id="scfa-badge">CALIBRATING</div>
+                        </div>
+                        <div id="scfa-desc" class="scfa-desc-text">Awaiting baseline calculation...</div>
+                    </div>
+
+                    <div class="scfa-stats">
+                        <div class="scfa-stat">
+                            <div class="scfa-stat-label">Baseline</div>
+                            <div class="scfa-stat-val">
+                                <span id="baseline-rate">0.00</span><span class="scfa-unit"> det/hr</span>
+                            </div>
+                        </div>
+                        <div class="scfa-stat-div"></div>
+                        <div class="scfa-stat">
+                            <div class="scfa-stat-label">Current</div>
+                            <div class="scfa-stat-val">
+                                <span id="current-rate">0.00</span><span class="scfa-unit"> det/hr</span>
+                            </div>
+                        </div>
+                        <div class="scfa-stat-div"></div>
+                        <div class="scfa-stat">
+                            <div class="scfa-stat-label">Sigma Level</div>
+                            <div class="scfa-stat-val"><span id="sigma-level">0σ</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="scfa-legend">
+                    <div class="legend-item good">
+                        <span class="legend-dot"></span><b>[NOMINAL]</b>&nbsp;Within 3σ baseline
+                    </div>
+                    <div class="legend-item warn">
+                        <span class="legend-dot"></span><b>[3-SIGMA]</b>&nbsp;99.7% anomaly
+                    </div>
+                    <div class="legend-item crit">
+                        <span class="legend-dot"></span><b>[6-SIGMA]</b>&nbsp;Critical event
+                    </div>
+                </div>
+            </section>
+
+            <!-- Live Flux Chart ─────────────────────────── -->
+            <section class="panel">
+                <div class="panel-hdr">
+                    <div class="panel-title">Live Flux vs. Pressure Correlation</div>
+                    <div class="panel-sub">Last 7 Days&nbsp;·&nbsp;Energy (ADC 0–255)</div>
+                </div>
+                <div class="chart-wrap" style="height: 260px;">
+                    <canvas id="muonChart"></canvas>
+                    <div class="chart-fallback" id="muonChartFallback">
+                        Chart library unavailable — check network connection.
+                    </div>
+                </div>
+            </section>
+
+            <!-- Detection Rate + Rolling ─────────────────── -->
+            <section class="panel">
+                <div class="panel-hdr">
+                    <div class="panel-title">Detection Rate Analysis</div>
+                    <div class="panel-sub">Detections per hour&nbsp;·&nbsp;rolling windows</div>
+                </div>
+                <div class="rate-grid">
+                    <div class="rate-item">
+                        <div class="rate-label">Last 10 Min</div>
+                        <div class="rate-val" id="rate-10m">—</div>
+                    </div>
+                    <div class="rate-item">
+                        <div class="rate-label">Last Hour</div>
+                        <div class="rate-val" id="rate-1h">—</div>
+                    </div>
+                    <div class="rate-item">
+                        <div class="rate-label">Last 6 Hours</div>
+                        <div class="rate-val" id="rate-6h">—</div>
+                    </div>
+                    <div class="rate-item">
+                        <div class="rate-label">Last 24 Hours</div>
+                        <div class="rate-val" id="rate-24h">—</div>
+                    </div>
+                </div>
+                <div class="rolling-section">
+                    <div class="rolling-label">4-Hour Rolling Average&nbsp;·&nbsp;Last 7 Days</div>
+                    <div class="chart-wrap" style="height: 155px;">
+                        <canvas id="rollingChart"></canvas>
+                        <div class="chart-fallback" id="rollingChartFallback">
+                            Chart library unavailable — check network connection.
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Particle Track Gallery ───────────────────── -->
+            <section class="panel">
+                <div class="panel-hdr">
+                    <div class="panel-title">Historical Particle Track Archive</div>
+                    <div class="panel-sub">Last 10 Detections&nbsp;·&nbsp;double-click to expand</div>
+                </div>
+                <div class="gallery-grid" id="gallery-container">
+                    <div class="gallery-empty">Awaiting first detection...</div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Image Modal -->
+    <div id="imgModal" class="modal" role="dialog" aria-modal="true" aria-label="Enlarged particle track" onclick="closeModal()">
+        <button class="modal-close" onclick="event.stopPropagation(); closeModal()" aria-label="Close">✕</button>
+        <img class="modal-content" id="modalImg" alt="Particle track — enlarged view">
+    </div>
+
+    <script>
+        /* ═══════════════════════════════════════════════════════
+           LIVE UTC CLOCK
+        ═══════════════════════════════════════════════════════ */
+        function updateClock() {
+            const el = document.getElementById('live-clock');
+            if (!el) return;
+            const now = new Date();
+            const hh = String(now.getUTCHours()).padStart(2, '0');
+            const mm = String(now.getUTCMinutes()).padStart(2, '0');
+            const ss = String(now.getUTCSeconds()).padStart(2, '0');
+            el.textContent = `${hh}:${mm}:${ss} UTC`;
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        /* ═══════════════════════════════════════════════════════
+           HEADER PARTICLE CANVAS (lightweight, Pi-friendly)
+        ═══════════════════════════════════════════════════════ */
+        (function () {
+            const canvas = document.getElementById('hdr-canvas');
+            if (!canvas || !canvas.getContext) return;
+            const ctx = canvas.getContext('2d');
+            let W, H;
+
+            function resize() {
+                W = canvas.width  = canvas.offsetWidth;
+                H = canvas.height = canvas.offsetHeight;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+
+            // Drifting star particles
+            const particles = Array.from({ length: 38 }, () => ({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                vx: (Math.random() - 0.5) * 0.18,
+                vy: (Math.random() - 0.5) * 0.18,
+                r:  Math.random() * 1.1 + 0.3,
+                ba: Math.random() * 0.38 + 0.1,
+                ph: Math.random() * Math.PI * 2
+            }));
+
+            // Occasional cosmic-ray streaks
+            let streaks = [];
+            function spawnStreak() {
+                const x1 = Math.random() * W;
+                const y1 = Math.random() * H;
+                const angle = Math.random() * Math.PI * 2;
+                const len   = Math.random() * 85 + 25;
+                streaks.push({
+                    x1, y1,
+                    x2: x1 + Math.cos(angle) * len,
+                    y2: y1 + Math.sin(angle) * len,
+                    life: 1.0
+                });
+                setTimeout(spawnStreak, Math.random() * 5500 + 2500);
+            }
+            spawnStreak();
+
+            function frame() {
+                ctx.clearRect(0, 0, W, H);
+                const t = Date.now() * 0.001;
+
+                for (const p of particles) {
+                    p.x = (p.x + p.vx + W) % W;
+                    p.y = (p.y + p.vy + H) % H;
+                    const alpha = p.ba * (0.55 + 0.45 * Math.sin(t * 0.75 + p.ph));
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.r, 0, 6.283);
+                    ctx.fillStyle = `rgba(100, 175, 255, ${alpha})`;
+                    ctx.fill();
+                }
+
+                streaks = streaks.filter(s => s.life > 0);
+                for (const s of streaks) {
+                    ctx.beginPath();
+                    ctx.moveTo(s.x1, s.y1);
+                    ctx.lineTo(s.x2, s.y2);
+                    ctx.strokeStyle = `rgba(72, 220, 255, ${s.life * 0.6})`;
+                    ctx.lineWidth = 0.8;
+                    ctx.stroke();
+                    s.life -= 0.016;
+                }
+
+                requestAnimationFrame(frame);
+            }
+            frame();
+        })();
+
+        /* ═══════════════════════════════════════════════════════
+           CHART & DATA LOGIC
+        ═══════════════════════════════════════════════════════ */
+        const DATA_FILE = 'detections.json';
+        const HAS_CHART = typeof Chart !== 'undefined';
+
+        if (!HAS_CHART) {
+            document.getElementById('muonChartFallback').style.display = 'flex';
+            document.getElementById('rollingChartFallback').style.display = 'flex';
+        }
+
+        const muonChart = HAS_CHART ? new Chart(document.getElementById('muonChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: 'Energy (ADC)',
+                    data: [],
+                    backgroundColor: '#3b82f6',
+                    borderColor: '#3b82f6',
+                    borderWidth: 0,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'nearest', intersect: true },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'day',
+                            displayFormats: { hour: 'MMM dd HH:mm', day: 'MMM dd' }
+                        },
+                        grid: { display: false },
+                        ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    y: {
+                        type: 'linear',
+                        min: 0,
+                        max: 255,
+                        grid: { color: '#192030' },
+                        ticks: { color: '#6b7280' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: '#0d1019',
+                        borderColor: '#192030',
+                        borderWidth: 1,
+                        callbacks: {
+                            title: (items) => new Date(items[0].raw.x).toLocaleString(),
+                            label: (item) => {
+                                const raw = item.raw;
+                                return [
+                                    `Energy: ${raw.y}`,
+                                    `Pressure: ${raw.pressure ? raw.pressure + ' hPa' : 'N/A'}`
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        }) : null;
+
+        const rollingChart = HAS_CHART ? new Chart(document.getElementById('rollingChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: '4-Hour Rolling Avg',
+                    data: [],
+                    backgroundColor: 'rgba(16, 185, 129, 0.07)',
+                    borderColor: '#10b981',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: { unit: 'day', displayFormats: { hour: 'MMM dd HH:mm', day: 'MMM dd' } },
+                        grid: { display: false },
+                        ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    y: {
+                        type: 'linear',
+                        min: 0,
+                        grid: { color: '#192030' },
+                        ticks: { color: '#6b7280' }
+                    }
+                },
+                plugins: { legend: { display: false } }
+            }
+        }) : null;
+
+        /* ───────────────── STATISTICAL ANALYSIS ───────────────── */
+
+        function calculateStats(values) {
+            if (values.length === 0) return { mean: 0, stdDev: 0 };
+            const mean = values.reduce((a, b) => a + b, 0) / values.length;
+            const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+            const stdDev = Math.sqrt(variance);
+            return { mean, stdDev };
+        }
+
+        function calculateDetectionRate(data, windowMs) {
+            const now = Date.now();
+            const windowStart = now - windowMs;
+            const detections = data.filter(d => d.timestamp >= windowStart);
+            const windowHours = windowMs / (1000 * 60 * 60);
+            return detections.length / windowHours;
+        }
+
+        function calculateRollingAverage(data, windowHours = 4) {
+            const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const recentData = data.filter(d => d.timestamp >= sevenDaysAgo);
+
+            if (recentData.length === 0) return [];
+
+            const hourlyBuckets = {};
+            recentData.forEach(d => {
+                const hourKey = Math.floor(d.timestamp / (1000 * 60 * 60));
+                hourlyBuckets[hourKey] = (hourlyBuckets[hourKey] || 0) + 1;
+            });
+
+            const rollingData = [];
+            const hours = Object.keys(hourlyBuckets).map(Number).sort((a, b) => a - b);
+
+            for (let i = windowHours - 1; i < hours.length; i++) {
+                const windowSum = hours.slice(i - windowHours + 1, i + 1)
+                    .reduce((sum, h) => sum + (hourlyBuckets[h] || 0), 0);
+                const avg = windowSum / windowHours;
+                rollingData.push({ x: hours[i] * 1000 * 60 * 60, y: avg });
+            }
+
+            return rollingData;
+        }
+
+        function calculateBaseline(data) {
+            if (data.length < 10) return null;
+
+            const dataByHour = {};
+            data.forEach(d => {
+                const hourKey = Math.floor(d.timestamp / (1000 * 60 * 60));
+                dataByHour[hourKey] = (dataByHour[hourKey] || 0) + 1;
+            });
+
+            const hourlyRates = Object.values(dataByHour);
+            return calculateStats(hourlyRates);
+        }
+
+        function updateSCFAStatus(currentRate, baseline) {
+            const badge      = document.getElementById('scfa-badge');
+            const desc       = document.getElementById('scfa-desc');
+            const baselineEl = document.getElementById('baseline-rate');
+            const currentEl  = document.getElementById('current-rate');
+            const sigmaEl    = document.getElementById('sigma-level');
+            const heroPanel  = document.getElementById('scfa-hero-panel');
+
+            // Reset badge state classes
+            badge.classList.remove('status-good', 'status-warn', 'status-crit');
+
+            if (!baseline || baseline.stdDev === 0) {
+                badge.textContent = 'CALIBRATING';
+                desc.textContent  = 'Collecting baseline data (minimum 24 hours required)...';
+                baselineEl.textContent = '0.00';
+                currentEl.textContent  = currentRate.toFixed(2);
+                sigmaEl.textContent    = '0σ';
+                heroPanel && heroPanel.removeAttribute('data-status');
+                return;
+            }
+
+            const deviation  = currentRate - baseline.mean;
+            const sigmaLevel = baseline.stdDev > 0 ? deviation / baseline.stdDev : 0;
+
+            baselineEl.textContent = baseline.mean.toFixed(2);
+            currentEl.textContent  = currentRate.toFixed(2);
+            sigmaEl.textContent    = sigmaLevel.toFixed(2) + 'σ';
+
+            if (sigmaLevel >= 6) {
+                badge.textContent = '6-SIGMA';
+                badge.classList.add('status-crit');
+                desc.textContent = 'CRITICAL: Detection rate 6σ above baseline. Potential geophysical correlation.';
+                heroPanel && heroPanel.setAttribute('data-status', 'crit');
+            } else if (sigmaLevel >= 3) {
+                badge.textContent = '3-SIGMA';
+                badge.classList.add('status-warn');
+                desc.textContent = 'ANOMALY: Detection rate 3σ above baseline. 99.7% probability of deviation.';
+                heroPanel && heroPanel.setAttribute('data-status', 'warn');
+            } else {
+                badge.textContent = 'NOMINAL';
+                badge.classList.add('status-good');
+                desc.textContent = 'System operating within standard baseline levels.';
+                heroPanel && heroPanel.setAttribute('data-status', 'good');
+            }
+        }
+
+        function applyStationInfo(station, operator) {
+            if (station) {
+                document.getElementById('page-title').innerText = `${station} Dashboard`;
+                document.getElementById('station-name-display').innerText = station;
+                const obsName = document.getElementById('observatory-name');
+                if (obsName) obsName.innerText = `${station.toUpperCase()} OBSERVATORY`;
+            }
+            if (operator) {
+                document.getElementById('operator-name-display').innerText = operator;
+            }
+        }
+
+        function clearSkeleton(el) {
+            el.classList.remove('skeleton');
+        }
+
+        function setStaleWarning(isStale) {
+            const el = document.getElementById('data-stale-warning');
+            if (el) el.style.display = isStale ? 'inline' : 'none';
+        }
+
+        async function refreshDashboard() {
+            try {
+                const r = await fetch(DATA_FILE + '?t=' + Date.now());
+                if (!r.ok) throw new Error("File not found");
+                const data = await r.json();
+                setStaleWarning(false);
+
+                const detCountEl = document.getElementById('det-count');
+                detCountEl.innerText = data.length;
+                clearSkeleton(detCountEl);
+
+                const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+                const recentData = data.filter(d => d.timestamp >= sevenDaysAgo);
+
+                const weeklyCountEl = document.getElementById('weekly-count');
+                weeklyCountEl.innerText = recentData.length;
+                clearSkeleton(weeklyCountEl);
+
+                // Build daily counts
+                const dailyCounts = {};
+                recentData.forEach(d => {
+                    const dateObj = new Date(d.timestamp);
+                    const dateKey = dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                    dailyCounts[dateKey] = (dailyCounts[dateKey] || 0) + 1;
+                });
+
+                // Render daily breakdown with bar-fill
+                const breakdownContainer = document.getElementById('daily-breakdown');
+                breakdownContainer.innerHTML = '';
+
+                const dayKeys = [];
+                for (let i = 0; i < 7; i++) {
+                    const d = new Date();
+                    d.setDate(d.getDate() - i);
+                    dayKeys.push(d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }));
+                }
+
+                const maxCount = Math.max(1, ...dayKeys.map(k => dailyCounts[k] || 0));
+
+                dayKeys.forEach(key => {
+                    const count = dailyCounts[key] || 0;
+                    const pct   = Math.round((count / maxCount) * 100);
+                    const row   = document.createElement('div');
+                    row.className = 'daily-row';
+                    row.innerHTML = `<span class="daily-bar" style="width:${pct}%"></span><span class="day">${key}</span><span class="count">${count}</span>`;
+                    breakdownContainer.appendChild(row);
+                });
+
+                // Update main flux chart
+                if (HAS_CHART) {
+                    const chartPoints = recentData.map(d => ({
+                        x: d.timestamp,
+                        y: d.max,
+                        pressure: d.pressure
+                    }));
+                    muonChart.data.datasets[0].data = chartPoints;
+                    muonChart.update();
+                }
+
+                // Render particle gallery
+                const gallery = document.getElementById('gallery-container');
+                gallery.innerHTML = '';
+                const recentHits = data.slice(-10).reverse().filter(hit => hit.frame_content);
+
+                if (recentHits.length === 0) {
+                    gallery.innerHTML = '<div class="gallery-empty">Awaiting first detection...</div>';
+                } else {
+                    recentHits.forEach(hit => {
+                        const div = document.createElement('div');
+                        div.className = 'hit-card';
+                        const src = hit.frame_content.startsWith('data:')
+                            ? hit.frame_content
+                            : `data:image/png;base64,${hit.frame_content}`;
+                        const timeStr = new Date(hit.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        div.ondblclick = () => openModal(src, div);
+                        div.innerHTML = `
+                            <img src="${src}" alt="Particle track">
+                            <div class="hit-info">E: ${hit.max} ADC&nbsp;&middot;&nbsp;${timeStr}</div>
+                        `;
+                        gallery.appendChild(div);
+                    });
+                }
+
+                // Detection rates
+                const rate10m = calculateDetectionRate(data, 10 * 60 * 1000);
+                const rate1h  = calculateDetectionRate(data, 60 * 60 * 1000);
+                const rate6h  = calculateDetectionRate(data, 6 * 60 * 60 * 1000);
+                const rate24h = calculateDetectionRate(data, 24 * 60 * 60 * 1000);
+
+                ['rate-10m', 'rate-1h', 'rate-6h', 'rate-24h'].forEach(id => clearSkeleton(document.getElementById(id)));
+                document.getElementById('rate-10m').innerText = rate10m.toFixed(2);
+                document.getElementById('rate-1h').innerText  = rate1h.toFixed(2);
+                document.getElementById('rate-6h').innerText  = rate6h.toFixed(2);
+                document.getElementById('rate-24h').innerText = rate24h.toFixed(2);
+
+                // SCFA anomaly detection
+                const baseline = calculateBaseline(data);
+                updateSCFAStatus(rate1h, baseline);
+
+                // Rolling chart
+                if (HAS_CHART) {
+                    const rollingData = calculateRollingAverage(data, 4);
+                    rollingChart.data.datasets[0].data = rollingData;
+                    rollingChart.update();
+                }
+
+                // Station info from last detection metadata
+                if (data.length > 0) {
+                    const last = data[data.length - 1];
+                    let press = last.pressure || 0;
+                    const cam = last.camera_model || "Unknown";
+                    let station  = null;
+                    let operator = null;
+
+                    if (last.metadata) {
+                        try {
+                            const metaData = JSON.parse(last.metadata);
+                            if (metaData.pressure_hpa) press = metaData.pressure_hpa;
+                            station  = metaData.station_id || null;
+                            operator = metaData.operator   || null;
+                        } catch (e) { /* metadata is best-effort */ }
+                    }
+
+                    document.getElementById('env-metrics').innerText = `📡 ${press} hPa · ${cam}`;
+                    applyStationInfo(station, operator);
+                }
+
+            } catch (e) {
+                console.error("Dash Error:", e);
+                setStaleWarning(true);
+            }
+        }
+
+        async function updateConnectionStatus() {
+            const dot   = document.getElementById('sys-status-dot');
+            const label = document.getElementById('sys-status');
+            try {
+                const r = await fetch('status.json?t=' + Date.now());
+                if (!r.ok) throw new Error("Status file not found");
+                const statusData = await r.json();
+
+                applyStationInfo(statusData.station, statusData.operator);
+
+                if (statusData.pressure_hpa && statusData.camera_model) {
+                    document.getElementById('env-metrics').innerText =
+                        `📡 ${statusData.pressure_hpa} hPa · ${statusData.camera_model}`;
+                }
+
+                if (statusData.connected) {
+                    label.innerText   = "CONNECTED";
+                    label.className   = "status-text good";
+                    dot.style.background = "var(--good)";
+                } else {
+                    label.innerText   = "DISCONNECTED";
+                    label.className   = "status-text crit";
+                    dot.style.background = "var(--crit)";
+                }
+            } catch (e) {
+                label.innerText   = "DISCONNECTED";
+                label.className   = "status-text crit";
+                dot.style.background = "var(--crit)";
+            }
+        }
+
+        async function updateSolar() {
+            try {
+                const r = await fetch('https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json');
+                const d = await r.json();
+                const val = (d && d.length > 0 && d[d.length - 1].class_max)
+                    ? d[d.length - 1].class_max
+                    : "QUIET";
+                document.getElementById('solar-val').innerText = `☀ Solar X-Ray: ${val}`;
+            } catch (e) {
+                document.getElementById('solar-val').innerText = "☀ Solar X-Ray: OFFLINE";
+            }
+        }
+
+        async function updateWeather() {
+            try {
+                let lat = 40.7128, lng = -74.0060, locName = "NYC";
+                try {
+                    const statusRes = await fetch('status.json?t=' + Date.now());
+                    if (statusRes.ok) {
+                        const s = await statusRes.json();
+                        if (s.lat && s.lng) { lat = s.lat; lng = s.lng; locName = "Station"; }
+                    }
+                } catch (e) { /* fall back to default coords */ }
+
+                const r = await fetch(
+                    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,surface_pressure`
+                );
+                const d = await r.json();
+                const current  = d.current || {};
+                const outdoorC = current.temperature_2m;
+                if (outdoorC !== undefined) {
+                    const outdoorF = ((outdoorC * 9 / 5) + 32).toFixed(1);
+                    document.getElementById('outdoor-temp').innerText =
+                        `🌡 ${locName}: ${outdoorC}°C (${outdoorF}°F)`;
+                }
+            } catch (e) {
+                document.getElementById('outdoor-temp').innerText = '🌡 Outdoor: Unavailable';
+            }
+        }
+
+        let modalLastFocusedEl = null;
+
+        function openModal(src, triggerEl) {
+            modalLastFocusedEl = triggerEl || document.activeElement;
+            document.getElementById('modalImg').src = src;
+            document.getElementById('imgModal').style.display = 'flex';
+            document.querySelector('.modal-close').focus();
+            document.addEventListener('keydown', handleModalKeydown);
+        }
+
+        function closeModal() {
+            document.getElementById('imgModal').style.display = 'none';
+            document.removeEventListener('keydown', handleModalKeydown);
+            modalLastFocusedEl?.focus();
+        }
+
+        function handleModalKeydown(e) {
+            if (e.key === 'Escape') closeModal();
+        }
+
+        // Initial load
+        refreshDashboard();
+        updateConnectionStatus();
+        updateSolar();
+        updateWeather();
+
+        // Refresh intervals
+        setInterval(refreshDashboard,        30000);
+        setInterval(updateConnectionStatus,  30000);
+        setInterval(updateSolar,            600000);
+        setInterval(updateWeather,          900000);
+    </script>
+
+</body>
+
+</html>

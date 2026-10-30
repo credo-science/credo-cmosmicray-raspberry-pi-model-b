@@ -15,19 +15,15 @@ import requests
 import os
 import subprocess
 import threading
+import queue
+import signal
 import sys
 import logging
-import logging.handlers
 import copy
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
-import asyncio
-import websockets
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-from collections import deque
 from dotenv import load_dotenv
-
-# Load local environment variables if .env exists
-load_dotenv()
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -35,51 +31,104 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-# Suppress noisy library logs to avoid confusion with CREDO connection
-logging.getLogger("websockets").setLevel(logging.WARNING)
 
-# --- CONFIGURATION ---
-STATION_ID = os.getenv("CREDO_STATION") 
-CREDO_USER = os.getenv("CREDO_USER")
-DEVICE_MODEL = os.getenv("CREDO_DEVICE_MODEL")
-SOFTWARE_VERSION = os.getenv("CREDO_SOFTWARE_VERSION")
-CREDO_PASS = os.getenv("CREDO_PASS")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_LOG_FILE     = os.path.join(BASE_DIR, "detections.json")
-LOCAL_ARCHIVE_FILE = os.path.join(BASE_DIR, "detections_archive.jsonl")  # append-only; never truncated
-LOCAL_STATUS_FILE  = os.path.join(BASE_DIR, "status.json")
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 
 # --- HARDWARE PROFILES ---
-# threshold      : legacy absolute pixel-diff gate (kept for reference)
-# min_absolute   : hard minimum diff value to even consider a hit
-# ratio_threshold: adaptive gate — maxVal must be >= ratio_threshold * bg_brightness
-# ratio_min      : floor for the adaptive gate (ignores very dark backgrounds)
 HARDWARE_PROFILES = {
     "C270_FAMILY": {
-        "threshold": 60, "exposure": 1000, "gain": 255, "driver_quirk": "legacy",
-        "min_absolute": 70, "ratio_threshold": 3.5, "ratio_min": 45
+        "threshold": 60, "exposure": 1000, "gain": 255, "driver_quirk": "legacy"
     },
     "C922_FAMILY": {
-        "threshold": 95, "exposure": 150, "gain": 128, "driver_quirk": "standard",
-        "min_absolute": 95, "ratio_threshold": 4.0, "ratio_min": 70
+        "threshold": 95, "exposure": 150, "gain": 128, "driver_quirk": "standard"
     },
     "GENERIC": {
-        "threshold": 80, "exposure": 500, "gain": 150, "driver_quirk": "standard",
-        "min_absolute": 80, "ratio_threshold": 3.5, "ratio_min": 55
+        "threshold": 80, "exposure": 500, "gain": 150, "driver_quirk": "standard"
     }
 }
 
-# --- CAMERA SELECTION ---
-RAW_CAM_MODEL = os.getenv("CREDO_CAMERA_MODEL", "Logitech C920")
-if "C270" in RAW_CAM_MODEL.upper():
-    PROFILE_KEY = "Logitech C270"
-    PROFILE = HARDWARE_PROFILES["C270_FAMILY"]
-elif "C922" in RAW_CAM_MODEL.upper():
-    PROFILE_KEY = "Logitech C922"
-    PROFILE = HARDWARE_PROFILES["C922_FAMILY"]
-else:
-    PROFILE_KEY = "Generic Camera"
-    PROFILE = HARDWARE_PROFILES["GENERIC"]
+
+def _select_camera_profile(raw_model):
+    upper = raw_model.upper()
+    if "C270" in upper:
+        return "Logitech C270", HARDWARE_PROFILES["C270_FAMILY"]
+    if "C922" in upper:
+        return "Logitech C922", HARDWARE_PROFILES["C922_FAMILY"]
+    return "Generic Camera", HARDWARE_PROFILES["GENERIC"]
+
+
+# --- CONFIGURATION ---
+_REQUIRED_ENV = [
+    "CREDO_STATION", "CREDO_USER", "CREDO_PASS", "CREDO_DEVICE_MODEL",
+    "CREDO_SOFTWARE_VERSION", "CREDO_LAT", "CREDO_LNG", "CREDO_ALT",
+]
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Validated runtime configuration, loaded once from the environment.
+
+    Grouping these into one immutable object (instead of ~10 loose module
+    globals) means every function that needs config takes/reads `config`
+    explicitly, and tests can construct a fresh instance per test instead of
+    monkeypatching individual module-level names.
+    """
+    station_id: str
+    credo_user: str
+    credo_pass: str
+    device_model: str
+    software_version: str
+    lat: float
+    lng: float
+    alt: float
+    camera_profile_key: str
+    camera_profile: dict
+    public_dir: str
+
+    @classmethod
+    def from_env(cls, base_dir):
+        """Loads and validates configuration from the environment. Exits the
+        process with an actionable message on missing/invalid values.
+
+        This is the production entrypoint's fail-fast startup check -- it's
+        only ever called under `__main__` (not at module scope), so
+        `import CMOSmicRay` from a test file never triggers it even when
+        .env isn't present.
+        """
+        missing = [name for name in _REQUIRED_ENV if not os.getenv(name)]
+        if missing:
+            logging.error(
+                f"[CONFIG] Missing required environment variable(s): {', '.join(missing)}. "
+                f"Copy .env.example to .env and fill in your CREDO credentials/location, "
+                f"or export them before launching."
+            )
+            sys.exit(1)
+        try:
+            lat = float(os.getenv("CREDO_LAT"))
+            lng = float(os.getenv("CREDO_LNG"))
+            alt = float(os.getenv("CREDO_ALT"))
+        except ValueError:
+            logging.error("[CONFIG] CREDO_LAT/CREDO_LNG/CREDO_ALT must be numeric.")
+            sys.exit(1)
+
+        profile_key, profile = _select_camera_profile(os.getenv("CREDO_CAMERA_MODEL", "Logitech C920"))
+
+        return cls(
+            station_id=os.getenv("CREDO_STATION"),
+            credo_user=os.getenv("CREDO_USER"),
+            credo_pass=os.getenv("CREDO_PASS"),
+            device_model=os.getenv("CREDO_DEVICE_MODEL"),
+            software_version=os.getenv("CREDO_SOFTWARE_VERSION"),
+            lat=lat, lng=lng, alt=alt,
+            camera_profile_key=profile_key,
+            camera_profile=profile,
+            public_dir=os.path.join(base_dir, "public"),
+        )
+
+
+config = None  # set by AppConfig.from_env() under __main__
 
 # --- API ENDPOINTS ---
 CREDO_BASE_URL = "https://api.credo.science/api/v2"
@@ -88,303 +137,211 @@ PING_URL = f"{CREDO_BASE_URL}/ping"
 DETECT_URL = f"{CREDO_BASE_URL}/detection"
 
 # --- SETTINGS ---
-CAMERA_INDEX   = int(os.getenv("CAMERA_INDEX",   "0"))
-CAPTURE_WIDTH  = int(os.getenv("CAPTURE_WIDTH",  "640"))
-CAPTURE_HEIGHT = int(os.getenv("CAPTURE_HEIGHT", "480"))
-CROP_SIZE      = int(os.getenv("CROP_SIZE",      "64"))
-PING_INTERVAL  = int(os.getenv("PING_INTERVAL",  "600"))
-LAT = float(os.getenv("CREDO_LAT"))
-LNG = float(os.getenv("CREDO_LNG"))
-ALT = float(os.getenv("CREDO_ALT"))
-
-# --- CALIBRATION (PRD §1) ---
-CALIBRATION_FRAMES    = int(float(os.getenv("CALIBRATION_FRAMES",    "500")))   # Minimum frames to establish noise floor before detection
-OBSCURATION_AVG_MAX   = float(os.getenv("OBSCURATION_AVG_MAX",        "10"))     # PRD: average pixel brightness must be <= 10
-OBSCURATION_BLACK_MIN = float(os.getenv("OBSCURATION_BLACK_MIN",      "0.050"))  # Lowered to 5% to handle high-gain sensor noise floor
-
-# --- THERMAL PROTECTION (PRD §2) ---
-THERMAL_CEILING_C      = float(os.getenv("THERMAL_CEILING_C",         "70.0"))  # PRD: exit if CPU temp exceeds this; systemd restarts the process
-THERMAL_CHECK_INTERVAL = int(float(os.getenv("THERMAL_CHECK_INTERVAL", "30")))  # Seconds between vcgencmd calls to limit subprocess overhead
-
+CAMERA_INDEX = 0
+CAPTURE_WIDTH = 1280; CAPTURE_HEIGHT = 720; CROP_SIZE = 64
+PING_INTERVAL = 600
+LOGIN_RETRY_BASE = 5
+LOGIN_RETRY_MAX = 300  # cap re-login backoff at 5 minutes
+LOOP_PROFILE_INTERVAL = 60  # seconds between capture-loop profiling summaries
 
 # --- STATE ---
-bg_frame = None; alpha = 0.01; current_token = None
 SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
-last_frame_time = time.time()
-data_cache = []          # Capped at 1000 entries; plain list for JSON serialisation
-connected_clients = set()
-recent_alerts = deque(maxlen=2)  # Keeps the last 2 CRITICAL alert messages for dashboard display
-
-# --- CALIBRATION STATE ---
-calibration_complete    = False
-calibration_frame_count = 0
-
-# --- THERMAL STATE ---
-last_thermal_check = 0.0
-
-# --- OBSCURATION STATE ---
-last_obscuration_check = time.time()
-
-# --- ATMOSPHERIC STATE ---
-cached_pressure = 1013.25 
-cached_outdoor_temp = None
-last_pressure_check = 0
-PRESSURE_CACHE_DURATION = 900 
-
-def get_pressure():
-    global cached_pressure, cached_outdoor_temp, last_pressure_check
-    now = time.time()
-    if (now - last_pressure_check) < PRESSURE_CACHE_DURATION:
-        return cached_pressure
-    try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LNG}&current=surface_pressure,temperature_2m"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            current = data.get('current', {})
-            if 'surface_pressure' in current:
-                cached_pressure = current['surface_pressure']
-            if 'temperature_2m' in current:
-                cached_outdoor_temp = current['temperature_2m']
-            last_pressure_check = now
-            logging.info(f"[WX] Updated: {cached_pressure} hPa | {cached_outdoor_temp}°C outdoor")
-    except Exception as e:
-        logging.error(f"[WX] Update Error: {e}")
-    return cached_pressure
-
-def get_outdoor_temp():
-    return cached_outdoor_temp
-
-# --- DIAGNOSTIC TRACE LOGGER ---
-# Uses a RotatingFileHandler: max 2 MB per file, keeps 5 backups (~10 MB total).
-# CSV format so the data can be loaded directly into pandas / Excel for analysis.
-DIAG_LOG_FILE = os.path.join(BASE_DIR, "trace_diagnostics.csv")
-
-_diag_handler = logging.handlers.RotatingFileHandler(
-    DIAG_LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8"
-)
-_diag_handler.setFormatter(logging.Formatter("%(message)s"))  # raw CSV rows
-
-diag_logger = logging.getLogger("TraceDiagnostics")
-diag_logger.setLevel(logging.INFO)
-diag_logger.addHandler(_diag_handler)
-diag_logger.propagate = False  # don't echo to the main console stream
-
-# Write CSV header only when the file is new / empty
-if not os.path.exists(DIAG_LOG_FILE) or os.path.getsize(DIAG_LOG_FILE) == 0:
-    diag_logger.info("timestamp_iso,status,max_val,bg_val,ratio,loc_x,loc_y,note")
 
 
-def log_trace_event(status, max_val, bg_val, coord, note=""):
+class AuthState:
+    """Holds the CREDO session token and the lock protecting it against
+    concurrent re-login storms (see tests/test_auth.py's concurrent-login
+    regression test). Uses an RLock so login() can hold the lock across its
+    whole check-then-network-then-set sequence while still calling
+    get_token()/set_token() internally.
     """
-    Appends one CSV row to the rotating diagnostic log.
-    status: 'ACCEPTED' | 'REJECTED_SENSITIVITY' | 'REJECTED_SPATIAL'
-    """
-    ratio = (max_val / bg_val) if bg_val > 0 else float("inf")
-    row = (
-        f"{datetime.utcnow().isoformat()},"
-        f"{status},{int(max_val)},{int(bg_val)},{ratio:.2f},"
-        f"{coord[0]},{coord[1]},{note}"
-    )
-    diag_logger.info(row)
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self._token = None
+
+    def get_token(self):
+        with self.lock:
+            return self._token
+
+    def set_token(self, token):
+        with self.lock:
+            self._token = token
+
+    def clear_token(self):
+        self.set_token(None)
 
 
-def is_spatially_valid(diff_frame, x, y, peak_val):
-    """
-    Returns True if the 3x3 neighbourhood around (x, y) contains more than one
-    pixel above 50 % of the peak value — i.e. the hit is NOT an isolated hot pixel.
-    """
-    roi = diff_frame[max(0, y - 1):y + 2, max(0, x - 1):x + 2]
-    return int(np.sum(roi >= (peak_val * 0.5))) > 1
+class EnvironmentState:
+    """Caches the last-fetched barometric pressure / outdoor temperature so
+    every detection doesn't trigger a fresh Open-Meteo API call."""
 
+    CACHE_DURATION_S = 900
 
-def check_obscuration(gray_frame):
-    """
-    PRD §1 — Sensor Obscuration Verification.
-    Returns True if the lens appears correctly covered (dark).
-    Thresholds:
-      • Average pixel brightness <= OBSCURATION_AVG_MAX  (10 / 255)
-      • Black pixel density     >= OBSCURATION_BLACK_MIN (999 per mille)
-    Called once at the end of calibration; caller must sys.exit(1) on False.
-    """
-    avg_brightness = float(np.mean(gray_frame))
-    # Count pixels <= 3 to handle the noise floor of older USB sensors
-    black_ratio    = float(np.sum(gray_frame <= 5)) / gray_frame.size
-    ok = (avg_brightness <= OBSCURATION_AVG_MAX) and (black_ratio >= OBSCURATION_BLACK_MIN)
-    if not ok:
-        msg1 = (
-            f"[OBSCURATION] FAIL — avg_brightness={avg_brightness:.2f} "
-            f"(limit <= {OBSCURATION_AVG_MAX}), "
-            f"black_density={black_ratio * 1000:.1f} per mille (limit >= {OBSCURATION_BLACK_MIN * 1000:.0f})"
-        )
-        logging.critical(msg1)
-        recent_alerts.append(msg1)
-    return ok
+    def __init__(self):
+        self.pressure_hpa = 1013.25
+        self.outdoor_temp_c = None
+        self._last_check = 0
 
-def push_alert(level: str, lines: list):
-    """
-    Thread-safe helper called from the main loop or sub-threads to push a
-    CRITICAL alert to all connected dashboard clients.  Because the WebSocket
-    event loop lives on a separate thread we schedule the coroutine onto it
-    with asyncio.run_coroutine_threadsafe().
-    """
-    global _ws_event_loop
-    if _ws_event_loop is None:
-        return
-    payload = json.dumps({
-        "type": "alert",
-        "level": level,
-        "lines": lines,
-        "timestamp": int(time.time() * 1000)
-    })
-    async def _send():
-        for ws in list(connected_clients):
-            try:
-                await ws.send(payload)
-            except Exception:
-                connected_clients.discard(ws)
-    asyncio.run_coroutine_threadsafe(_send(), _ws_event_loop)
-
-
-# --- WEBSOCKET LOGIC (MODULE-LEVEL) ---
-
-async def handler(websocket):
-    """Handles the lifecycle of a single dashboard client connection."""
-    client_info = websocket.remote_address
-    connected_clients.add(websocket)
-    logging.info(f"[WS] Client connected: {client_info}")
-
-    try:
-        # Initial sync: send historical data and script start time
-        await websocket.send(json.dumps({
-            "type": "init",
-            "data": list(data_cache),
-            "script_start": SCRIPT_START
-        }))
-        # Keep connection alive; listen for any client messages
-        async for message in websocket:
-            pass
-
-    except (ConnectionClosedError, ConnectionClosedOK):
-        logging.info(f"[WS] Client {client_info} disconnected normally.")
-    except Exception as e:
-        logging.error(f"[WS] Error with client {client_info}: {e}")
-    finally:
-        connected_clients.discard(websocket)
-        logging.info(f"[WS] Client {client_info} removed from active set.")
-
-
-async def broadcast():
-    """Background task: push telemetry updates to all active dashboard clients."""
-    while True:
-        await asyncio.sleep(1)
+    def get_pressure(self, lat, lng):
+        now = time.time()
+        if (now - self._last_check) < self.CACHE_DURATION_S:
+            return self.pressure_hpa
         try:
-            now = time.time()
-            sys_status = "SYSTEM_STALLED" if (now - last_frame_time > 5.0) else "OK"
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&current=surface_pressure,temperature_2m"
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                current = data.get('current', {})
+                if 'surface_pressure' in current:
+                    self.pressure_hpa = current['surface_pressure']
+                if 'temperature_2m' in current:
+                    self.outdoor_temp_c = current['temperature_2m']
+                self._last_check = now
+                logging.info(f"[WX] Updated: {self.pressure_hpa} hPa | {self.outdoor_temp_c}°C outdoor")
+        except requests.RequestException as e:
+            logging.error(f"[WX] Update Error: {e}")
+        return self.pressure_hpa
 
-            payload = {
-                "type": "update",
-                "timestamp": int(now * 1000),
-                "temp": get_outdoor_temp() or 0.0,
-                "pressure": get_pressure() or 0.0,
-                "system_status": sys_status,
-                "calibrating": not calibration_complete,
-                "calibration_progress": calibration_frame_count if not calibration_complete else CALIBRATION_FRAMES
-            }
+    def get_outdoor_temp(self):
+        return self.outdoor_temp_c
 
-            # Update cache and cap memory usage
-            data_cache.append(payload)
-            if len(data_cache) > 1000:
-                data_cache.pop(0)
 
-            if not connected_clients:
-                continue
+class LocalStore:
+    """Owns the local JSON files the dashboard reads (detections.json,
+    status.json) and the single-writer queue that serializes writes to
+    detections.json -- concurrent writers would race on its
+    read-modify-write cycle (see tests/test_local_log.py).
+    """
 
-            msg = json.dumps(payload)
-            # Broadcast guard: prune dead connections on send failure
-            for ws in list(connected_clients):
+    MAX_DETECTIONS = 1000
+
+    def __init__(self, public_dir):
+        self.log_file = os.path.join(public_dir, "detections.json")
+        self.status_file = os.path.join(public_dir, "status.json")
+        self.queue = queue.Queue()
+
+    def save_local_log(self, payload):
+        try:
+            detection_data = payload["detections"][0]
+            data_list = []
+            if os.path.exists(self.log_file):
                 try:
-                    await ws.send(msg)
-                except (ConnectionClosedError, ConnectionClosedOK, Exception):
-                    connected_clients.discard(ws)
+                    with open(self.log_file, 'r') as f:
+                        data_list = json.load(f)
+                except json.JSONDecodeError:
+                    data_list = []
 
-        except Exception as e:
-            logging.error(f"[WS] Broadcast loop error: {e}")
+            data_list.append(detection_data)
+            if len(data_list) > self.MAX_DETECTIONS:
+                data_list = data_list[-self.MAX_DETECTIONS:]
+            with open(self.log_file, 'w') as f:
+                json.dump(data_list, f, indent=4)
+            logging.info(f"[LOCAL] Saved for Dashboard.")
+        except (OSError, KeyError, IndexError) as e:
+            logging.error(f"[LOCAL] Write Failed: {e}")
 
+    def writer_loop(self):
+        while True:
+            payload = self.queue.get()
+            try:
+                self.save_local_log(payload)
+            except Exception as e:
+                # task_done() must always fire, even on an unexpected error --
+                # otherwise shutdown()'s queue.join() blocks forever on this
+                # one un-acked item and the process can't exit cleanly.
+                logging.error(f"[LOCAL] Writer thread error: {e}")
+            finally:
+                self.queue.task_done()
 
-_ws_event_loop = None  # Set by ws_thread_target so push_alert() can schedule onto it
-
-
-def ws_thread_target():
-    """Entry point for the dedicated WebSocket server thread."""
-    global _ws_event_loop
-    new_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(new_loop)
-    _ws_event_loop = new_loop
-
-    async def main_ws():
-        logging.info("[WS] Server starting on port 8001...")
-        broadcast_task = asyncio.create_task(broadcast())
+    def update_status(self, is_connected, config, environment):
         try:
-            async with websockets.serve(
-                handler, "0.0.0.0", 8001,
-                ping_interval=20,
-                ping_timeout=20
-            ):
-                await asyncio.Future()  # Run forever
-        finally:
-            broadcast_task.cancel()
+            with open(self.status_file, "w") as f:
+                json.dump({
+                    "connected": is_connected,
+                    "timestamp": time.time(),
+                    "station": config.station_id,
+                    "operator": config.credo_user,
+                    "pressure_hpa": environment.get_pressure(config.lat, config.lng),
+                    "camera_model": config.camera_profile_key,
+                    # Rounded to ~1km precision -- this file is served
+                    # unauthenticated by the dashboard's http.server, so
+                    # full-precision coordinates (which CREDO still receives
+                    # at full precision, see process_hit) don't belong in a
+                    # public, unauthenticated endpoint.
+                    "lat": round(config.lat, 2) if config.lat is not None else None,
+                    "lng": round(config.lng, 2) if config.lng is not None else None
+                }, f)
+        except OSError as e:
+            logging.error(f"[STATUS] Write Failed: {e}")
 
-    try:
-        new_loop.run_until_complete(main_ws())
-    finally:
-        new_loop.close()
 
-def tune_driver():
-    logging.info(f"[HARDWARE] Tuning {PROFILE_KEY} ({PROFILE['driver_quirk']})...")
+class MotionDetector:
+    """Frame-differencing background-subtraction detector. Owns the running
+    background estimate (bg_frame) instead of it being a bare module global.
+    """
+
+    def __init__(self, alpha=0.01):
+        self.alpha = alpha
+        self.bg_frame = None
+
+    def detect(self, gray_frame):
+        """Returns (max_val, x, y, diff) for the strongest deviation from the
+        rolling background, or None on the frame that just seeded it."""
+        if self.bg_frame is None:
+            self.bg_frame = gray_frame.astype("float")
+            return None
+        cv2.accumulateWeighted(gray_frame, self.bg_frame, self.alpha)
+        diff = cv2.absdiff(gray_frame, cv2.convertScaleAbs(self.bg_frame))
+        _, max_val, _, max_loc = cv2.minMaxLoc(diff)
+        return max_val, max_loc[0], max_loc[1], diff
+
+
+auth = AuthState()
+environment = EnvironmentState()
+store = LocalStore(PUBLIC_DIR)
+
+# Bounded upload concurrency so a burst of hits can't spawn unbounded threads.
+upload_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="upload")
+
+
+def tune_driver(profile_key, profile):
+    logging.info(f"[HARDWARE] Tuning {profile_key} ({profile['driver_quirk']})...")
     v = f"/dev/video{CAMERA_INDEX}"
     try:
         subprocess.run(["v4l2-ctl", "-d", v, "--set-ctrl=auto_exposure=1"], stderr=subprocess.DEVNULL)
         subprocess.run(["v4l2-ctl", "-d", v, "--set-ctrl=exposure_auto=1"], stderr=subprocess.DEVNULL)
-        if PROFILE['driver_quirk'] == "legacy":
-            subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=exposure_time_absolute={PROFILE['exposure']}"], stderr=subprocess.DEVNULL)
+        if profile['driver_quirk'] == "legacy":
+            subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=exposure_time_absolute={profile['exposure']}"], stderr=subprocess.DEVNULL)
         else:
-            subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=exposure_absolute={PROFILE['exposure']}"], stderr=subprocess.DEVNULL)
-        subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=gain={PROFILE['gain']}"], stderr=subprocess.DEVNULL)
+            subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=exposure_absolute={profile['exposure']}"], stderr=subprocess.DEVNULL)
+        subprocess.run(["v4l2-ctl", "-d", v, f"--set-ctrl=gain={profile['gain']}"], stderr=subprocess.DEVNULL)
         subprocess.run(["v4l2-ctl", "-d", v, "--set-ctrl=white_balance_automatic=0"], stderr=subprocess.DEVNULL)
-        logging.info(f"[HARDWARE] Tuned. Exp:{PROFILE['exposure']} Gain:{PROFILE['gain']}")
-    except: logging.error("[HARDWARE] Tuning warning.")
+        logging.info(f"[HARDWARE] Tuned. Exp:{profile['exposure']} Gain:{profile['gain']}")
+    except (subprocess.SubprocessError, OSError) as e:
+        logging.error(f"[HARDWARE] Tuning warning: {e}")
+
 
 def get_temp():
-    try: return float(subprocess.check_output(["vcgencmd", "measure_temp"]).decode().replace("temp=","").replace("'C\n",""))
-    except: return 0.0
+    try:
+        raw = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
+        return float(raw.replace("temp=", "").replace("'C\n", ""))
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return 0.0
+
 
 def get_meta(pressure_val=None):
     meta_dict = {
-        "device_model": DEVICE_MODEL,
-        "camera_model": PROFILE_KEY,
-        "station_id": STATION_ID,
-        "operator": CREDO_USER,
-        "temperature": get_outdoor_temp(),
-        "software_version": SOFTWARE_VERSION
+        "device_model": config.device_model,
+        "camera_model": config.camera_profile_key,
+        "station_id": config.station_id,
+        "operator": config.credo_user,
+        "temperature": environment.get_outdoor_temp(),
+        "software_version": config.software_version
     }
     if pressure_val: meta_dict["pressure_hpa"] = pressure_val
     return json.dumps(meta_dict)
 
-def update_status_file(is_connected):
-    try:
-        with open(LOCAL_STATUS_FILE, "w") as f:
-            json.dump({
-                "connected": is_connected, 
-                "timestamp": time.time(), 
-                "station": STATION_ID, 
-                "operator": CREDO_USER,
-                "pressure_hpa": get_pressure(),
-                "camera_model": PROFILE_KEY,
-                "lat": LAT,
-                "lng": LNG
-            }, f)
-    except: pass
 
 def payload_inspector(tag, data):
     try:
@@ -394,336 +351,217 @@ def payload_inspector(tag, data):
                 if 'frame_content' in d:
                     d['frame_content'] = "<BASE64_IMAGE_DATA_TRUNCATED>"
         logging.info(f"[{tag}] Payload Inspector:\n{json.dumps(debug_copy, indent=2)}")
-    except Exception as e:
+    except (TypeError, ValueError) as e:
         logging.error(f"[{tag}] Inspector Failed: {e}")
 
+
 def login():
-    global current_token
-    try:
-        logging.info(f"[AUTH] Attempting Login for {CREDO_USER}...")
-        r = requests.post(LOGIN_URL, json={
-            "username": CREDO_USER, "password": CREDO_PASS, "device_id": STATION_ID,
-            "device_type": "detector", "device_model": DEVICE_MODEL, 
-            "system_version": "Linux", "app_version": SOFTWARE_VERSION
-        }, timeout=20)
-        
-        if r.status_code == 200: 
-            current_token = r.json().get('token')
-            logging.info("[AUTH] Login Successful. Token acquired.")
-            update_status_file(True)
+    with auth.lock:
+        if auth.get_token():
             return True
-        else:
-            logging.error(f"[AUTH] Login Failed. Status: {r.status_code} | Body: {r.text}")
-            update_status_file(False)
+        try:
+            r = requests.post(LOGIN_URL, json={
+                "username": config.credo_user, "password": config.credo_pass, "device_id": config.station_id,
+                "device_type": "detector", "device_model": config.device_model,
+                "system_version": "Linux", "app_version": config.software_version
+            }, timeout=20)
+            if r.status_code == 200:
+                auth.set_token(r.json().get('token'))
+                logging.info("[AUTH] Login Successful.")
+                store.update_status(True, config, environment)
+                return True
+            store.update_status(False, config, environment)
             return False
-    except Exception as e: 
-        logging.error(f"[AUTH] Connection Error during Login: {e}")
-        update_status_file(False)
-        return False
+        except requests.RequestException as e:
+            logging.error(f"[AUTH] Login Error: {e}")
+            store.update_status(False, config, environment)
+            return False
+
 
 def ping():
-    global current_token, LAST_PING
+    global LAST_PING
+    retry_delay = LOGIN_RETRY_BASE
     while True:
-        if not current_token: login(); time.sleep(5); continue
+        if not auth.get_token():
+            login()
+            if not auth.get_token():
+                # Exponential backoff so a prolonged auth failure (bad
+                # credentials, CREDO outage) doesn't hammer the login
+                # endpoint every 5s indefinitely.
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, LOGIN_RETRY_MAX)
+                continue
+            retry_delay = LOGIN_RETRY_BASE
         try:
             now = int(time.time()*1000)
+            # CREDO sums on_time server-side, so it must be the time since the
+            # last successful ping (not cumulative since start). Coordinates
+            # belong only in detections; the ping schema has no lat/lng.
+            delta = now-LAST_PING
             payload = {
-                "device_id": STATION_ID, "device_type": "detector", "device_model": DEVICE_MODEL,
-                "system_version": "Linux", "app_version": SOFTWARE_VERSION, "timestamp": now,
-                "delta_time": now-LAST_PING, "on_time": now-SCRIPT_START,
-                "lat": LAT, "lng": LNG, "provider": "network", "metadata": get_meta(get_pressure())
+                "device_id": config.station_id, "device_type": "detector", "device_model": config.device_model,
+                "system_version": "Linux", "app_version": config.software_version, "timestamp": now,
+                "delta_time": delta, "on_time": delta, "provider": "network",
+                "metadata": get_meta(environment.get_pressure(config.lat, config.lng))
             }
             payload_inspector("PING", payload)
-            r = requests.post(PING_URL, json=payload, headers={"Authorization": f"Token {current_token}"}, timeout=15)
-            if r.status_code == 200: 
-                logging.info(f"[NET] Ping Sent. P:{cached_pressure}hPa")
+            r = requests.post(PING_URL, json=payload, headers={"Authorization": f"Token {auth.get_token()}"}, timeout=15)
+            if r.status_code == 200:
+                logging.info(f"[NET] Ping Sent. P:{environment.pressure_hpa}hPa")
                 LAST_PING = now
-            elif r.status_code == 401: 
+            elif r.status_code == 401:
                 logging.warning(f"[NET] 401 Unauthorized. Re-login required.")
-                current_token = None
-                update_status_file(False)
+                auth.clear_token()
+                store.update_status(False, config, environment)
             else:
                 logging.error(f"[NET] Ping Failed ({r.status_code}): {r.text}")
-        except Exception as e:
+        except requests.RequestException as e:
             logging.error(f"[NET] Error: {e}")
-        
+        except Exception as e:
+            # This loop is the resilience boundary for the daemon thread --
+            # unlike leaf functions, it must never let an unexpected
+            # exception (e.g. a JSON decode error on an older requests
+            # version) kill the ping/re-login heartbeat permanently.
+            logging.error(f"[NET] Unexpected error, continuing: {e}")
+
         # Keep local status file updated with latest pressure even if no detections
-        update_status_file(True if current_token else False)    
+        store.update_status(True if auth.get_token() else False, config, environment)
         time.sleep(PING_INTERVAL)
 
+
 def upload_worker(payload):
-    global current_token
     try:
-        if not current_token: login()
+        if not auth.get_token(): login()
         payload_inspector("UPLOAD", payload)
-        r = requests.post(DETECT_URL, json=payload, headers={"Authorization": f"Token {current_token}"}, timeout=20)
+        r = requests.post(DETECT_URL, json=payload, headers={"Authorization": f"Token {auth.get_token()}"}, timeout=20)
         if r.status_code == 200:
             logging.info(f"[UPLOAD] Cloud Success. Server Replied: {r.text}")
+        elif r.status_code == 401:
+            logging.warning("[UPLOAD] 401 Unauthorized, forcing re-login.")
+            auth.clear_token()
         else:
             logging.error(f"[UPLOAD] Cloud Failed ({r.status_code}). Server Replied: {r.text}")
-    except Exception as e:
+    except requests.RequestException as e:
         logging.error(f"[UPLOAD] Cloud Error: {e}")
 
-def save_local_log(payload):
-    """
-    Persists a detection to two stores:
-
-    1. detections_archive.jsonl  — append-only JSONL, metadata only (no image),
-       never truncated.  Safe against power-loss because each record is a single
-       atomic line-append; even a partial write leaves all previous lines intact.
-
-    2. detections.json           — rolling cache of the last 1 000 full records
-       (including the base-64 image) for the dashboard gallery.  Written
-       atomically via a temp-file + os.replace() so a crash mid-write cannot
-       corrupt the file.
-    """
-    try:
-        detection_data = payload["detections"][0]
-
-        # ── 1. Append-only archive (metadata; no image) ──────────────────────
-        archive_record = {
-            "timestamp":    detection_data["timestamp"],
-            "x":            detection_data["x"],
-            "y":            detection_data["y"],
-            "max":          detection_data["max"],
-            "pressure":     detection_data.get("pressure"),
-            "outdoor_temp": detection_data.get("outdoor_temp"),
-            "camera_model": detection_data.get("camera_model"),
-        }
-        with open(LOCAL_ARCHIVE_FILE, "a", encoding="utf-8") as af:
-            af.write(json.dumps(archive_record) + "\n")
-
-        # ── 2. Rolling display cache (atomic write) ──────────────────────────
-        data_list = []
-        if os.path.exists(LOCAL_LOG_FILE):
-            try:
-                with open(LOCAL_LOG_FILE, 'r') as f:
-                    data_list = json.load(f)
-                    if len(data_list) > 1000:
-                        data_list = data_list[-1000:]
-            except json.JSONDecodeError:
-                data_list = []
-
-        data_list.append(detection_data)
-        tmp_path = LOCAL_LOG_FILE + ".tmp"
-        with open(tmp_path, 'w') as f:
-            json.dump(data_list, f, indent=4)
-        os.replace(tmp_path, LOCAL_LOG_FILE)  # atomic on POSIX
-
-        logging.info(f"[LOCAL] Saved for Dashboard. Archive total: ~{detection_data['timestamp']}")
-    except Exception as e:
-        logging.error(f"[LOCAL] Write Failed: {e}")
 
 def process_hit(frame, x, y, max_val):
     h, w = frame.shape
     hc = CROP_SIZE // 2
     sx, sy = max(0, min(x-hc, w-CROP_SIZE)), max(0, min(y-hc, h-CROP_SIZE))
-    
+
     raw_b64 = base64.b64encode(cv2.imencode('.png', frame[sy:sy+CROP_SIZE, sx:sx+CROP_SIZE])[1]).decode('utf-8')
     web_b64 = f"data:image/png;base64,{raw_b64}"
-    current_pressure = get_pressure()
-    current_outdoor_temp = get_outdoor_temp()
-    
+    current_pressure = environment.get_pressure(config.lat, config.lng)
+    current_outdoor_temp = environment.get_outdoor_temp()
+
     cloud_payload = {
-        "device_id": STATION_ID, "device_type": "detector", "device_model": DEVICE_MODEL,
-        "system_version": "Linux", "app_version": SOFTWARE_VERSION,
+        "device_id": config.station_id, "device_type": "detector", "device_model": config.device_model,
+        "system_version": "Linux", "app_version": config.software_version,
         "detections": [{
-            "timestamp": int(time.time()*1000), "frame_content": raw_b64, 
-            "x": int(x), "y": int(y), "width": w, "height": h, "max": int(max_val),  
+            "timestamp": int(time.time()*1000), "frame_content": raw_b64,
+            "x": int(x), "y": int(y), "width": w, "height": h, "max": int(max_val),
             "metadata": get_meta(current_pressure),
-            "latitude": LAT, "longitude": LNG, "altitude": ALT, "accuracy": 50, "provider": "network"
+            "latitude": config.lat, "longitude": config.lng, "altitude": config.alt, "accuracy": 50, "provider": "network"
         }]
     }
 
     local_payload = {
         "detections": [{
-            "timestamp": int(time.time()*1000), 
+            "timestamp": int(time.time()*1000),
             "frame_content": web_b64,
             "x": int(x), "y": int(y), "max": int(max_val),
             "pressure": current_pressure,
             "outdoor_temp": current_outdoor_temp,
-            "camera_model": PROFILE_KEY,
+            "camera_model": config.camera_profile_key,
             "metadata": get_meta(current_pressure)
         }]
     }
-    
-    threading.Thread(target=upload_worker, args=(cloud_payload,)).start()
-    threading.Thread(target=save_local_log, args=(local_payload,)).start()
-    logging.info(f"[HIT] Intensity:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
 
-def config_watcher():
-    global CREDO_USER, CREDO_PASS, STATION_ID, DEVICE_MODEL, SOFTWARE_VERSION, LAT, LNG, ALT, current_token
-    last_mtime = 0
-    env_path = os.path.join(BASE_DIR, ".env")
-    if not os.path.exists(env_path):
-        env_path = ".env"
-        
-    while True:
-        try:
-            if os.path.exists(env_path):
-                current_mtime = os.path.getmtime(env_path)
-                if current_mtime > last_mtime:
-                    if last_mtime != 0:
-                        load_dotenv(dotenv_path=env_path, override=True)
-                        old_user = CREDO_USER
-                        old_pass = CREDO_PASS
-                        
-                        CREDO_USER = os.getenv("CREDO_USER")
-                        CREDO_PASS = os.getenv("CREDO_PASS")
-                        STATION_ID = os.getenv("CREDO_STATION")
-                        DEVICE_MODEL = os.getenv("CREDO_DEVICE_MODEL")
-                        SOFTWARE_VERSION = os.getenv("CREDO_SOFTWARE_VERSION")
-                        
-                        try: LAT = float(os.getenv("CREDO_LAT", LAT))
-                        except: pass
-                        try: LNG = float(os.getenv("CREDO_LNG", LNG))
-                        except: pass
-                        try: ALT = float(os.getenv("CREDO_ALT", ALT))
-                        except: pass
-                        
-                        if old_user != CREDO_USER or old_pass != CREDO_PASS:
-                            current_token = None
-                            logging.info(f"[CONFIG] Live Operator update detected ({CREDO_USER}).")
-                        
-                        update_status_file(True if current_token else False)
-                    last_mtime = current_mtime
-        except Exception:
-            pass
-        time.sleep(2)
+    upload_executor.submit(upload_worker, cloud_payload)
+    store.queue.put(local_payload)
+    logging.info(f"[HIT] Energy:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
+
+
+def shutdown(cap):
+    logging.info("[SHUTDOWN] Draining pending uploads and log writes...")
+    cap.release()
+    upload_executor.shutdown(wait=True, cancel_futures=False)
+    store.queue.join()
+    sys.exit(0)
+
+
+# --- CAPTURE LOOP PROFILING ---
+# Lightweight instrumentation to measure real capture-loop timing on target
+# hardware before deciding whether/how to throttle it (see TODOS.md). Logged
+# periodically, not per-frame, so the logging call itself doesn't skew the
+# numbers it's measuring.
+_loop_profile = {
+    "count": 0,
+    "compute_s": 0.0,
+    "compute_max_s": 0.0,
+    "total_s": 0.0,
+    "window_start": time.time(),
+}
+
+
+def _record_loop_time(compute_elapsed, total_elapsed):
+    p = _loop_profile
+    p["count"] += 1
+    p["compute_s"] += compute_elapsed
+    p["compute_max_s"] = max(p["compute_max_s"], compute_elapsed)
+    p["total_s"] += total_elapsed
+
+    now = time.time()
+    window = now - p["window_start"]
+    if window >= LOOP_PROFILE_INTERVAL and p["count"] > 0:
+        avg_compute_ms = (p["compute_s"] / p["count"]) * 1000
+        max_compute_ms = p["compute_max_s"] * 1000
+        avg_total_ms = (p["total_s"] / p["count"]) * 1000
+        iter_rate = p["count"] / window
+        logging.info(
+            f"[PROFILE] Capture loop: {iter_rate:.1f} iter/s | "
+            f"cv2 compute avg {avg_compute_ms:.1f}ms max {max_compute_ms:.1f}ms | "
+            f"total avg {avg_total_ms:.1f}ms (incl. cap.read() + sleeps) | "
+            f"n={p['count']} over {window:.0f}s"
+        )
+        p["count"] = 0
+        p["compute_s"] = 0.0
+        p["compute_max_s"] = 0.0
+        p["total_s"] = 0.0
+        p["window_start"] = now
+
 
 if __name__ == "__main__":
-    logging.info(f"--- CMOSmicRay {SOFTWARE_VERSION} ---")
-    logging.info(f"[CONFIG] Station: {STATION_ID} | Operator: {CREDO_USER}")
-    logging.info(f"[CONFIG] Location: {LAT}, {LNG} (Alt: {ALT}m)")
-    
-    get_pressure() 
-    tune_driver()
+    config = AppConfig.from_env(BASE_DIR)
+    os.makedirs(config.public_dir, exist_ok=True)
+    logging.info(f"--- CMOSmicRay {config.software_version} ---")
+    environment.get_pressure(config.lat, config.lng)
+    tune_driver(config.camera_profile_key, config.camera_profile)
     threading.Thread(target=ping, daemon=True).start()
-    threading.Thread(target=ws_thread_target, daemon=True).start()
-    threading.Thread(target=config_watcher, daemon=True).start()
+    threading.Thread(target=store.writer_loop, daemon=True).start()
 
     cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
     cap.set(3, CAPTURE_WIDTH); cap.set(4, CAPTURE_HEIGHT); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    signal.signal(signal.SIGINT, lambda sig, frame: shutdown(cap))
+    signal.signal(signal.SIGTERM, lambda sig, frame: shutdown(cap))
     time.sleep(2)
-    
+
+    detector = MotionDetector()
     while True:
+        iter_start = time.time()
         ret, frame = cap.read()
-        if not ret:
-            time.sleep(1)
-            continue
-
-        # Watchdog: record frame arrival for SYSTEM_STALLED detection
-        last_frame_time = time.time()
-
-        # PRD §2: Thermal protection — exit and let systemd restart if CPU overheats
-        now_t = time.time()
-        if (now_t - last_thermal_check) >= THERMAL_CHECK_INTERVAL:
-            cpu_temp = get_temp()
-            last_thermal_check = now_t
-            if cpu_temp > THERMAL_CEILING_C:
-                thermal_msg = (
-                    f"[THERMAL] CPU temperature {cpu_temp}°C exceeds "
-                    f"{THERMAL_CEILING_C}°C ceiling. Halting for systemd restart."
-                )
-                logging.critical(thermal_msg)
-                recent_alerts.append(thermal_msg)
-                push_alert("CRITICAL", list(recent_alerts))
-                sys.exit(1)
-
+        if not ret: time.sleep(1); continue
+        compute_start = time.time()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Initialize background model on very first frame
-        if bg_frame is None:
-            bg_frame = gray.astype("float")
+        result = detector.detect(gray)
+        if result is None:
             continue
+        max_val, x, y, diff = result
+        compute_elapsed = time.time() - compute_start
 
-        # Accumulate weighted background model every frame
-        cv2.accumulateWeighted(gray, bg_frame, alpha)
-
-        # PRD §1: Calibration gate — hard block; no detection until 500 frames collected
-        if not calibration_complete:
-            calibration_frame_count += 1
-            if calibration_frame_count % 100 == 0:
-                logging.info(f"[CAL] Calibrating... {calibration_frame_count}/{CALIBRATION_FRAMES} frames")
-            if calibration_frame_count >= CALIBRATION_FRAMES:
-                logging.info("[CAL] 500 frames collected. Running obscuration verification...")
-                if not check_obscuration(gray):
-                    msg2 = (
-                        "[OBSCURATION] ABORT — Camera lens does not appear to be covered. "
-                        "Cover the lens completely and restart the application."
-                    )
-                    logging.critical(msg2)
-                    recent_alerts.append(msg2)
-                    push_alert("CRITICAL", list(recent_alerts))
-                    sys.exit(1)
-                calibration_complete = True
-                logging.info("[CAL] Calibration complete. Obscuration verified. Detection is now active.")
-                last_obscuration_check = time.time()  # Reset timer on successful calibration
-            continue  # Hard block: skip detection during calibration phase
-
-        # --- PERIODIC OBSCURATION CHECK (v1.5.0) ---
-        if (now_t - last_obscuration_check) >= 600:
-            last_obscuration_check = now_t
-            logging.info("[OBSCURATION] Performing periodic verification...")
-            if not check_obscuration(gray):
-                msg_mid = (
-                    "[OBSCURATION] ABORT — Lens exposure detected mid-run! "
-                    "Cover the lens completely and restart the application."
-                )
-                logging.critical(msg_mid)
-                recent_alerts.append(msg_mid)
-                push_alert("CRITICAL", list(recent_alerts))
-                sys.exit(1)
-
-        diff = cv2.absdiff(gray, cv2.convertScaleAbs(bg_frame))
-
-        # --- MULTI-TRACE DETECTION (Iterative Masking) ---
-        # Search for up to 3 separate traces in the same frame
-        hits_this_frame = 0
-        for _ in range(3):
-            _, maxVal, _, maxLoc = cv2.minMaxLoc(diff)
-            x, y = maxLoc
-            bg_brightness = int(bg_frame[y, x])
-
-            # Gate 1: Sensitivity checks
-            cond_absolute = maxVal >= PROFILE['min_absolute']
-            cond_adaptive = (
-                maxVal >= PROFILE['ratio_threshold'] * bg_brightness
-                and maxVal >= PROFILE['ratio_min']
-            )
-            cond_not_edge = (x > 0 and y > 0)
-
-            if (cond_absolute or cond_adaptive) and cond_not_edge:
-                # Gate 2: Spatial hardening — reject isolated hot pixels
-                if is_spatially_valid(diff, x, y, maxVal):
-                    log_trace_event("ACCEPTED", maxVal, bg_brightness, maxLoc)
-                    process_hit(diff, x, y, maxVal)
-                    hits_this_frame += 1
-
-                    # MASKING: Black out the 64x64 region to search for another trace
-                    # We ensure slices remain within frame boundaries
-                    hc = CROP_SIZE // 2
-                    y1, y2 = max(0, y - hc), min(CAPTURE_HEIGHT, y + hc)
-                    x1, x2 = max(0, x - hc), min(CAPTURE_WIDTH, x + hc)
-                    diff[y1:y2, x1:x2] = 0
-                else:
-                    log_trace_event(
-                        "REJECTED_SPATIAL", maxVal, bg_brightness, maxLoc,
-                        "Isolated pixel — masked and proceeding"
-                    )
-                    # Mask the isolated pixel too, so we don't find it again immediately
-                    diff[max(0, y-1):y+2, max(0, x-1):x+2] = 0
-            elif maxVal > PROFILE['min_absolute'] * 0.7:
-                # Near-miss: reached 70 % of the absolute threshold
-                log_trace_event(
-                    "REJECTED_SENSITIVITY", maxVal, bg_brightness, maxLoc,
-                    "Near-miss (<threshold)"
-                )
-                break  # No need to look for smaller hits if the brightest is a near-miss
-            else:
-                break  # Intensity too low to continue searching
-
-        if hits_this_frame > 0:
-            time.sleep(0.5)  # Single cooldown after finding at least one hit
-
+        if max_val > config.camera_profile['threshold']:
+            process_hit(diff, x, y, max_val)
+            time.sleep(0.5)
         time.sleep(0.02)
+        _record_loop_time(compute_elapsed, time.time() - iter_start)

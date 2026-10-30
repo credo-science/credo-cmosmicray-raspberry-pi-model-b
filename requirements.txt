@@ -1,5 +1,3 @@
-opencv-python
-numpy
-requests
-websockets
+# opencv-python, numpy, and requests are installed via apt (see README Step 2)
+# to avoid slow source builds on Raspberry Pi. Only pip-only deps go here.
 python-dotenv

@@ -1,0 +1,23 @@
+# Log rotation for CMOSmicRay's daemon logs.
+#
+# start_CMOSmicRay.sh redirects stdout via `nohup ... >> CMOSmicRay.log`, so
+# the running process holds that file descriptor open for its entire
+# lifetime and never reopens the path -- `copytruncate` is required (the
+# default rotate-by-rename strategy would leave the process writing to a
+# now-unlinked file forever, silently freeing no disk space).
+#
+# Install:
+#   sudo cp packaging/cmosmicray.logrotate /etc/logrotate.d/cmosmicray
+#   sudo nano /etc/logrotate.d/cmosmicray   # fix the path below if needed
+#
+# logrotate is run daily by cron on Raspberry Pi OS out of the box, so no
+# further setup is required after installing this file.
+
+/home/pi/CMOSmicRay/CMOSmicRay/*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
