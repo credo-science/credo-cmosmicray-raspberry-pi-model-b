@@ -13,6 +13,7 @@ def cmr(monkeypatch, tmp_path):
 
     log_file = tmp_path / "detections.json"
     monkeypatch.setattr(cmr.store, "log_file", str(log_file))
+    monkeypatch.setattr(cmr.store, "archive_file", str(tmp_path / "detections_archive.jsonl"))
     return cmr
 
 

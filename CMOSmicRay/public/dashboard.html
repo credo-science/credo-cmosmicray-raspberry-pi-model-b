@@ -173,6 +173,20 @@
         .status-text          { font-weight: 600; }
         .status-text.good     { color: var(--good); }
         .status-text.crit     { color: var(--crit); }
+        .status-text.warn     { color: var(--warn); }
+
+        /* Station-health banner (alerts, calibration, staleness) */
+        .station-banner {
+            padding: 10px 24px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            line-height: 1.5;
+            border-bottom: 1px solid var(--crit);
+            background: var(--crit-dim);
+            color: var(--crit);
+        }
+        .station-banner.warn { border-bottom-color: var(--warn); background: var(--warn-dim); color: var(--warn); }
+        .station-banner.info { border-bottom-color: var(--text-dim); background: var(--bg-alt); color: var(--text); }
 
         /* ═══════════════════════════════════════════
            APP BODY
@@ -760,7 +774,7 @@
                 </div>
             </div>
             <div class="topbar-right">
-                <div id="live-clock" class="live-clock">00:00:00 UTC</div>
+                <div id="live-clock" class="live-clock">--:--:--</div>
                 <div class="topbar-meta-block">
                     <div>OPERATOR&nbsp;<span id="operator-name-display" class="op-name">—</span></div>
                     <div>
@@ -768,10 +782,13 @@
                         <span id="sys-status" class="status-text good">CONNECTED</span>
                     </div>
                     <div id="data-stale-warning" class="status-text crit" style="display:none;">⚠ DATA STALE</div>
+                    <div id="cpu-temp" class="status-text" style="display:none;"></div>
                 </div>
             </div>
         </div>
     </header>
+
+    <div id="station-banner" class="station-banner" role="alert" aria-live="polite" style="display:none;"></div>
 
     <!-- ─── APP BODY ─────────────────────────────────── -->
     <div class="app-body">
@@ -927,16 +944,50 @@
 
     <script>
         /* ═══════════════════════════════════════════════════════
-           LIVE UTC CLOCK
+           STATION-LOCAL CLOCK + TIMEZONE HELPERS
+           All times are shown in the station's own timezone (reported by the Pi in
+           status.json), so every viewer sees the same days and hours wherever they
+           are. Until status.json has been read the viewer's own zone is used.
+           Hover the clock for UTC. Stored data stays epoch/UTC.
         ═══════════════════════════════════════════════════════ */
+        let STATION_TZ = null;   // IANA name, e.g. "America/New_York"
+
+        function tzOpt() { return STATION_TZ ? { timeZone: STATION_TZ } : {}; }
+
+        // Returns true if the zone was valid and changed.
+        function setStationTz(name) {
+            try {
+                new Intl.DateTimeFormat('en-US', { timeZone: name });   // throws RangeError if unknown
+            } catch (e) { return false; }
+            if (name === STATION_TZ) return false;
+            STATION_TZ = name;
+            return true;
+        }
+
+        function fmtDayKey(d) {
+            return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', ...tzOpt() });
+        }
+
+        // The last n calendar days in the station's zone, newest first. Steps back in
+        // 24 h hops and skips repeats so a daylight-saving day cannot duplicate a key.
+        function lastDayKeys(n, nowMs) {
+            const keys = [];
+            for (let i = 0; keys.length < n && i < n + 3; i++) {
+                const k = fmtDayKey(new Date(nowMs - i * 86400000));
+                if (!keys.includes(k)) keys.push(k);
+            }
+            return keys;
+        }
+
         function updateClock() {
             const el = document.getElementById('live-clock');
             if (!el) return;
             const now = new Date();
-            const hh = String(now.getUTCHours()).padStart(2, '0');
-            const mm = String(now.getUTCMinutes()).padStart(2, '0');
-            const ss = String(now.getUTCSeconds()).padStart(2, '0');
-            el.textContent = `${hh}:${mm}:${ss} UTC`;
+            el.textContent = now.toLocaleTimeString('en-US', {
+                hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
+                timeZoneName: 'short', ...tzOpt()
+            });
+            el.title = 'UTC ' + now.toISOString().slice(11, 19);
         }
         setInterval(updateClock, 1000);
         updateClock();
@@ -1068,7 +1119,7 @@
                         borderColor: '#192030',
                         borderWidth: 1,
                         callbacks: {
-                            title: (items) => new Date(items[0].raw.x).toLocaleString(),
+                            title: (items) => new Date(items[0].raw.x).toLocaleString('en-US', { ...tzOpt(), timeZoneName: 'short' }),
                             label: (item) => {
                                 const raw = item.raw;
                                 return [
@@ -1261,8 +1312,7 @@
                 // Build daily counts
                 const dailyCounts = {};
                 recentData.forEach(d => {
-                    const dateObj = new Date(d.timestamp);
-                    const dateKey = dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                    const dateKey = fmtDayKey(new Date(d.timestamp));
                     dailyCounts[dateKey] = (dailyCounts[dateKey] || 0) + 1;
                 });
 
@@ -1270,12 +1320,7 @@
                 const breakdownContainer = document.getElementById('daily-breakdown');
                 breakdownContainer.innerHTML = '';
 
-                const dayKeys = [];
-                for (let i = 0; i < 7; i++) {
-                    const d = new Date();
-                    d.setDate(d.getDate() - i);
-                    dayKeys.push(d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }));
-                }
+                const dayKeys = lastDayKeys(7, Date.now());
 
                 const maxCount = Math.max(1, ...dayKeys.map(k => dailyCounts[k] || 0));
 
@@ -1313,7 +1358,7 @@
                         const src = hit.frame_content.startsWith('data:')
                             ? hit.frame_content
                             : `data:image/png;base64,${hit.frame_content}`;
-                        const timeStr = new Date(hit.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const timeStr = new Date(hit.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', ...tzOpt() });
                         div.ondblclick = () => openModal(src, div);
                         div.innerHTML = `
                             <img src="${src}" alt="Particle track">
@@ -1373,6 +1418,64 @@
             }
         }
 
+        // status.json is rewritten by the station about every 30 s. If it stops
+        // changing, the process has halted or crashed.
+        const STATUS_STALE_S = 120;
+        const CPU_WARN_C = 60, CPU_HALT_C = 70;   // match THERMAL_SOFT_C / THERMAL_CEILING_C
+
+        function showBanner(level, text) {
+            const b = document.getElementById('station-banner');
+            b.className = 'station-banner ' + level;
+            b.textContent = text;          // textContent: alert text is never parsed as HTML
+            b.style.display = 'block';
+        }
+
+        // Returns true when the station looks stale (caller shows it as not reporting).
+        function applyStationHealth(s, response) {
+            const banner = document.getElementById('station-banner');
+            const temp   = document.getElementById('cpu-temp');
+            if (!s) {
+                banner.style.display = 'none';
+                temp.style.display = 'none';
+                return false;
+            }
+
+            // Compare against the Pi's own clock (HTTP Date header from the Pi's
+            // web server) so a wrong clock on the viewing computer can't cause
+            // false stale warnings. Falls back to the viewer's clock.
+            let nowMs = Date.now();
+            const hdr = response && response.headers.get('Date');
+            if (hdr && !isNaN(Date.parse(hdr))) nowMs = Date.parse(hdr);
+            const ageS  = s.timestamp ? (nowMs - s.timestamp * 1000) / 1000 : null;
+            const stale = ageS !== null && ageS > STATUS_STALE_S;
+            const ageTxt = ageS === null ? '' :
+                (ageS < 3600 ? Math.round(ageS / 60) + ' min' : (ageS / 3600).toFixed(1) + ' h');
+
+            if (typeof s.cpu_temp_c === 'number' && s.cpu_temp_c > 0) {
+                temp.textContent = 'CPU ' + s.cpu_temp_c.toFixed(1) + '°C';
+                temp.className = 'status-text' + (s.cpu_temp_c >= CPU_HALT_C ? ' crit' : s.cpu_temp_c >= CPU_WARN_C ? ' warn' : '');
+                temp.style.display = '';
+            } else {
+                temp.style.display = 'none';
+            }
+
+            if (s.alert) {
+                showBanner('crit', '⚠ STATION HALTED — ' + s.alert + (stale ? ' (last update ' + ageTxt + ' ago)' : ''));
+            } else if (stale) {
+                showBanner('crit', '⚠ STATION NOT REPORTING — no status update for ' + ageTxt +
+                    '. The detector may have stopped; check the Pi.');
+            } else if (s.calibrating) {
+                showBanner('info', 'Calibrating: ' + (s.calibration_progress || 0) + ' / ' +
+                    (s.calibration_frames || 500) + ' frames — detection starts when complete.');
+            } else if (typeof s.cpu_temp_c === 'number' && s.cpu_temp_c >= CPU_WARN_C) {
+                showBanner('warn', 'CPU temperature ' + s.cpu_temp_c.toFixed(1) + '°C is above the ' + CPU_WARN_C +
+                    '°C warning level (the station halts at ' + CPU_HALT_C + '°C).');
+            } else {
+                banner.style.display = 'none';
+            }
+            return stale || !!s.alert;
+        }
+
         async function updateConnectionStatus() {
             const dot   = document.getElementById('sys-status-dot');
             const label = document.getElementById('sys-status');
@@ -1388,7 +1491,19 @@
                         `📡 ${statusData.pressure_hpa} hPa · ${statusData.camera_model}`;
                 }
 
-                if (statusData.connected) {
+                // Adopt the station's timezone from the Pi, then redraw time-dependent parts.
+                if (statusData.timezone && setStationTz(statusData.timezone)) {
+                    updateClock();
+                    refreshDashboard();
+                }
+
+                const halted = applyStationHealth(statusData, r);
+
+                if (halted) {
+                    label.innerText   = "NOT REPORTING";
+                    label.className   = "status-text crit";
+                    dot.style.background = "var(--crit)";
+                } else if (statusData.connected) {
                     label.innerText   = "CONNECTED";
                     label.className   = "status-text good";
                     dot.style.background = "var(--good)";
@@ -1398,6 +1513,7 @@
                     dot.style.background = "var(--crit)";
                 }
             } catch (e) {
+                applyStationHealth(null, null);
                 label.innerText   = "DISCONNECTED";
                 label.className   = "status-text crit";
                 dot.style.background = "var(--crit)";

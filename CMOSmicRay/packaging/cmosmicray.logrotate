@@ -6,9 +6,9 @@
 # default rotate-by-rename strategy would leave the process writing to a
 # now-unlinked file forever, silently freeing no disk space).
 #
-# Install:
-#   sudo cp packaging/cmosmicray.logrotate /etc/logrotate.d/cmosmicray
-#   sudo nano /etc/logrotate.d/cmosmicray   # fix the path below if needed
+# Install (run from the folder containing CMOSmicRay.py; rewrites the sample
+# path below to the real one):
+#   sed "s#/home/pi/CMOSmicRay/CMOSmicRay#$PWD#" packaging/cmosmicray.logrotate | sudo tee /etc/logrotate.d/cmosmicray
 #
 # logrotate is run daily by cron on Raspberry Pi OS out of the box, so no
 # further setup is required after installing this file.

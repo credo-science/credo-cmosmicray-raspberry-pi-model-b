@@ -1,0 +1,6 @@
+# Test-only dependencies. Not needed on the Raspberry Pi -- only for running
+# `pytest` on a dev machine.
+-r requirements.txt
+pytest>=7.4
+numpy>=1.24
+opencv-python-headless>=4.8

@@ -12,6 +12,7 @@ def cmr(monkeypatch, tmp_path):
     # three so this test stays a pure unit test of the crop-bounds math, not
     # an integration test.
     monkeypatch.setattr(cmr.store, "log_file", str(tmp_path / "detections.json"))
+    monkeypatch.setattr(cmr.store, "archive_file", str(tmp_path / "detections_archive.jsonl"))
     monkeypatch.setattr(cmr, "upload_executor", _ImmediateExecutor())
     monkeypatch.setattr(cmr.store, "queue", _SynchronousQueue(cmr))
     monkeypatch.setattr(cmr.environment, "get_pressure", lambda lat, lng: 1000.0)

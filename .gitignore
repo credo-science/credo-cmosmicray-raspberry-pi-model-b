@@ -7,6 +7,7 @@ status.json
 detections.json
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Local image captures
 CMOSmicRay_images/
@@ -16,6 +17,15 @@ CMOSmicRay_images/
 !dashboard_preview.png
 !monitor_dashboard.JPG
 
+# Local backup snapshots
+CMOS_0703.zip
+
 # OS generated files
 .DS_Store
 Thumbs.db
+detections_archive.jsonl
+trace_diagnostics.csv*
+hot_pixels.json*
+live_stats.csv*
+*.legacy-*.csv
+pi_data/

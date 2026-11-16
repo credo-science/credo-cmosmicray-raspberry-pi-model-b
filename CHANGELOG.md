@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-11-16
+Covers the 1.7.x series (1.7.1 – 1.7.5). Builds on the refactored, tested code base from `f8d7f2f`, which had dropped the safety and filtering features of 1.3–1.6; those are restored here.
+
+### Added
+- **Safety gates restored in the refactored code**: 500-frame calibration gate, dual-condition lens-cover check (end of calibration, every 600 s, and before every upload), tiered thermal protection (warn 60 °C, halt 70 °C), 3×3 spatial filter, adaptive thresholds (`min_absolute`, `ratio_threshold`, `ratio_min`) and up to 3 traces per frame. All limits are configurable from `.env` (see `.env.example`).
+- **Hot-pixel mask**: a position that yields 5 accepted hits (`HOT_PIXEL_MIN_HITS`) is treated as a sensor defect and every candidate within 3 px (`HOT_PIXEL_RADIUS`) is rejected as `REJECTED_HOT`. Positions are kept per capture size in `hot_pixels.json`. Long-run data showed fixed hot spots producing 65 % of accepted hits at 1280×720 against 1 % at 640×480.
+- **Live-time log**: `live_stats.csv` gets one row per hour (`STATS_WINDOW_S`) with frames processed, hits by status, capture size, requested and camera-reported exposure/gain and software version, so detection rates can be given per live hour.
+- **Local timestamps**: `trace_diagnostics.csv` and `live_stats.csv` keep UTC and add a station-local column with its UTC offset. The station timezone is detected (`STATION_TZ`, `/etc/timezone`, `/etc/localtime`) and published in `status.json`; the dashboard shows station-local time. A CSV with an older column layout is moved to `*.legacy-<timestamp>.csv` instead of being mixed with the new layout.
+- **Permanent archive and trace log** (`detections_archive.jsonl`, `trace_diagnostics.csv`), kept outside `public/` so the dashboard web server does not serve them.
+- **Dashboard** (now `public/dashboard.html`): station-local clock and day buckets, CPU temperature, and a banner when the station is halted or not reporting.
+- **Tooling**: 74 pytest tests, a GitHub Actions workflow, `requirements.txt` / `requirements-dev.txt`, a `logrotate` rule (`packaging/`), and README sections on the safety gates, settings, output files and a cron watchdog.
+
+### Changed
+- **Default capture size is 640×480** (`CAPTURE_WIDTH`, `CAPTURE_HEIGHT`). Expect about 6 processed frames/s on a Raspberry Pi Model B, against about 2 at 1280×720.
+- **C270 profile requests exposure 660.** The camera clamps anything above 666 while streaming, so the earlier request of 1000 was never applied.
+- **Start and stop scripts** match the detector and the dashboard server by the start of their command line, so a shell or ssh session that merely mentions the file name is no longer mistaken for the detector. The dashboard server serves only `public/`, and credentials are read from `.env`.
+- A halt (lens uncovered, CPU above the limit) writes its reason to `status.json` and exits with status 1. **The program does not restart itself**; use a service manager or the cron watchdog described in the README.
+
+### Fixed
+- `update_status` no longer blocks the capture loop on a weather request, and writes `status.json` atomically.
+- Heartbeat `on_time` is the time since the last successful ping (CREDO sums it server-side).
+
+### Removed (relative to 1.6.0 / `de70d2e`)
+These were already absent from the Oct 2026 refactor and are not restored:
+- The WebSocket live feed; the dashboard polls `detections.json` and `status.json` instead.
+- The `.env` live-reload watcher; restart the detector after changing `.env`.
+- The 1.5.0 wording change: log messages say "Energy" again rather than "Intensity" (the value is a peak grey-level excess, not an energy).
+
 ## [1.6.0] - 2026-05-05
 ### Added
 - **Per-Hit Obscuration Gate (Gold Standard)**: `check_obscuration()` now runs inside `process_hit()` before any upload is triggered. If the lens is exposed at the moment of detection, the hit is discarded and the process halts immediately — guaranteeing zero junk data ever reaches the CREDO API.
