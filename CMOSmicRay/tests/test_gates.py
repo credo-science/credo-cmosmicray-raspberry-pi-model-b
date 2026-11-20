@@ -419,3 +419,109 @@ def test_read_camera_controls_unreadable(monkeypatch):
         raise FileNotFoundError("no v4l2-ctl")
     monkeypatch.setattr(cmr.subprocess, "run", boom)
     assert cmr.read_camera_controls({"driver_quirk": "legacy"}) == ("", "")
+
+
+# --- obscuration pause/auto-resume & 2-line critical alerts ------------------
+def test_obscuration_pause_records_two_alerts_and_recovers_when_covered(monkeypatch, tmp_path):
+    store = make_store(tmp_path)
+    cfg = cmr.AppConfig("s", "u", "p", "m", "v", 1.0, 2.0, 3.0, "k", PROFILE, str(tmp_path / "public"))
+    env = cmr.EnvironmentState()
+    monkeypatch.setattr(cmr, "store", store)
+    monkeypatch.setattr(cmr, "config", cfg)
+    monkeypatch.setattr(cmr, "environment", env)
+
+    bright = np.full((60, 80), 120, np.uint8)
+    dark = np.full((60, 80), 1, np.uint8)
+
+    # 1. Uncovered lens pauses without sys.exit and writes 2 alert lines to status.json
+    assert cmr.verify_obscuration(bright, "periodic sweep") is False
+    st = json.load(open(store.status_file))
+    assert st["paused"] is True
+    assert len(st["alerts"]) == 2
+    assert "[OBSCURATION] FAIL (periodic sweep)" in st["alerts"][0]
+    assert "[OBSCURATION] PAUSED" in st["alerts"][1]
+
+    # 2. Still uncovered -> stays paused
+    det = cmr.MotionDetector()
+    det.detect(dark)
+    cal = cmr.CalibrationGate(10)
+    cal.feed(); cal.feed()
+    assert cmr.recover_if_obscured(bright, det, cal) is False
+    assert det.bg_frame is not None and cal.count == 2
+
+    # 3. Covered again -> clears alerts, resets bg_frame & calibration gate, resumes calibrating
+    assert cmr.recover_if_obscured(dark, det, cal) is True
+    assert det.bg_frame is None and cal.count == 0
+    st2 = json.load(open(store.status_file))
+    assert st2["paused"] is False and st2["alerts"] == [] and st2["calibrating"] is True
+
+
+# --- periodic thermal logging & telemetry history ----------------------------
+def test_check_thermal_logs_periodically_and_records_telemetry(monkeypatch, tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    store = make_store(tmp_path)
+    cfg = cmr.AppConfig("s", "u", "p", "m", "v", 1.0, 2.0, 3.0, "k", PROFILE, str(tmp_path / "public"))
+    env = cmr.EnvironmentState()
+    env.pressure_hpa = 1015.0
+    env.outdoor_temp_c = 18.5
+    monkeypatch.setattr(cmr, "store", store)
+    monkeypatch.setattr(cmr, "config", cfg)
+    monkeypatch.setattr(cmr, "environment", env)
+    monkeypatch.setattr(cmr, "_last_thermal_log", 0.0)
+    monkeypatch.setattr(cmr, "get_temp", lambda: 48.2)
+
+    cmr.check_thermal(now=1000.0)
+    assert any("[THERMAL] CPU temperature: 48.2°C" in r.message for r in caplog.records)
+    caplog.clear()
+
+    # Within 5-minute window: updates telemetry but doesn't spam info log
+    cmr.check_thermal(now=1030.0)
+    assert not any("[THERMAL] CPU temperature" in r.message for r in caplog.records)
+
+    # After 5 minutes (300 s): logs routine [THERMAL] info line again
+    cmr.check_thermal(now=1305.0)
+    assert any("[THERMAL] CPU temperature: 48.2°C" in r.message for r in caplog.records)
+
+    store.update_status(True, cfg, env)
+    st = json.load(open(store.status_file))
+    assert st["cpu_temp_c"] == 48.2
+    assert st["outdoor_temp_c"] == 18.5
+    assert len(st["env_history"]) == 3
+
+
+# --- .env live-reload watcher ------------------------------------------------
+def test_env_watcher_reloads_and_clears_token_on_credential_change(monkeypatch, tmp_path):
+    os.makedirs(tmp_path / "public", exist_ok=True)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "CREDO_STATION=st-1\nCREDO_USER=alice\nCREDO_PASS=p1\n"
+        "CREDO_DEVICE_MODEL=RPi\nCREDO_SOFTWARE_VERSION=v1.7.5\n"
+        "CREDO_LAT=40.7\nCREDO_LNG=-74.0\nCREDO_ALT=10\n",
+        encoding="utf-8",
+    )
+    for k, v in dict(CREDO_STATION="st-1", CREDO_USER="alice", CREDO_PASS="p1",
+                     CREDO_DEVICE_MODEL="RPi", CREDO_SOFTWARE_VERSION="v1.7.5",
+                     CREDO_LAT="40.7", CREDO_LNG="-74.0", CREDO_ALT="10").items():
+        monkeypatch.setenv(k, v)
+
+    cfg = cmr.AppConfig.from_env(str(tmp_path))
+    auth = cmr.AuthState(); auth.set_token("tok-123")
+    store = cmr.LocalStore(str(tmp_path / "public"))
+    env = cmr.EnvironmentState()
+    watcher = cmr.EnvWatcher(str(tmp_path))
+
+    # Modify .env with a new operator and advance mtime
+    env_file.write_text(
+        "CREDO_STATION=st-1\nCREDO_USER=bob\nCREDO_PASS=p2\n"
+        "CREDO_DEVICE_MODEL=RPi\nCREDO_SOFTWARE_VERSION=v1.7.5\n"
+        "CREDO_LAT=40.7\nCREDO_LNG=-74.0\nCREDO_ALT=10\n",
+        encoding="utf-8",
+    )
+    os.utime(env_file, (watcher.last_mtime + 10, watcher.last_mtime + 10))
+
+    new_cfg = watcher.check_reload(cfg, auth, store, env)
+    assert new_cfg.credo_user == "bob"
+    assert auth.get_token() is None
+    assert json.load(open(store.status_file))["operator"] == "bob"
+

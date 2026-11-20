@@ -177,16 +177,152 @@
 
         /* Station-health banner (alerts, calibration, staleness) */
         .station-banner {
-            padding: 10px 24px;
+            padding: 14px 18px;
             font-size: 0.78rem;
             font-weight: 600;
             line-height: 1.5;
-            border-bottom: 1px solid var(--crit);
-            background: var(--crit-dim);
-            color: var(--crit);
+            border: 1px solid var(--crit);
+            border-left: 4px solid var(--crit);
+            border-radius: var(--radius);
+            background: linear-gradient(135deg, rgba(45, 10, 10, 0.95) 0%, rgba(26, 5, 5, 0.95) 100%);
+            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.25);
+            color: #fca5a5;
         }
-        .station-banner.warn { border-bottom-color: var(--warn); background: var(--warn-dim); color: var(--warn); }
-        .station-banner.info { border-bottom-color: var(--text-dim); background: var(--bg-alt); color: var(--text); }
+        .station-banner.warn {
+            border-color: var(--warn);
+            border-left-color: var(--warn);
+            background: rgba(45, 30, 8, 0.92);
+            box-shadow: 0 4px 18px rgba(245, 158, 11, 0.18);
+            color: #fcd34d;
+        }
+        .station-banner.info {
+            border-color: var(--border-hi);
+            border-left-color: var(--accent);
+            background: var(--card-hi);
+            box-shadow: none;
+            color: var(--text);
+        }
+        .banner-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+        .banner-badge {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.63rem;
+            font-weight: 700;
+            letter-spacing: 1.3px;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 4px;
+            border: 1px solid currentColor;
+            background: rgba(0, 0, 0, 0.25);
+        }
+        .banner-title {
+            font-weight: 700;
+            font-size: 0.82rem;
+            color: #fff;
+        }
+        .banner-time {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            margin-left: auto;
+        }
+        .banner-dismiss {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--text-dim);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 0.68rem;
+            cursor: pointer;
+        }
+        .banner-dismiss:hover {
+            border-color: #fff;
+            color: #fff;
+        }
+        .alert-lines {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .alert-lines li {
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.71rem;
+            font-weight: 500;
+            color: #fecaca;
+            background: rgba(0, 0, 0, 0.35);
+            border-left: 3px solid var(--crit);
+            padding: 6px 10px;
+            border-radius: 0 4px 4px 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .station-banner.warn .alert-lines li {
+            color: #fde68a;
+            border-left-color: var(--warn);
+        }
+        .station-banner.info .alert-lines li {
+            color: var(--text);
+            border-left-color: var(--accent);
+        }
+        .topbar-actions {
+            margin-top: 3px;
+            font-size: 0.66rem;
+            color: var(--text-dim);
+        }
+        .topbar-link {
+            cursor: pointer;
+            color: var(--text-dim);
+            transition: color 0.15s;
+        }
+        .topbar-link:hover {
+            color: #fff;
+        }
+        .dialog-card {
+            background: var(--card);
+            border: 1px solid var(--border-hi);
+            padding: 26px 28px;
+            border-radius: var(--radius);
+            width: 460px;
+            max-width: 92%;
+            color: var(--text);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
+        }
+        .dialog-card h2, .dialog-card h3 {
+            margin-top: 0;
+            margin-bottom: 14px;
+            color: #fff;
+        }
+        .dialog-card h4 {
+            color: var(--accent);
+            margin-top: 14px;
+            margin-bottom: 4px;
+            font-size: 0.82rem;
+        }
+        .dialog-card p {
+            font-size: 0.78rem;
+            color: var(--text-dim);
+            margin: 0;
+            line-height: 1.55;
+        }
+        .dialog-btn {
+            width: 100%;
+            padding: 9px 12px;
+            margin-top: 18px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            font-weight: 600;
+            cursor: pointer;
+        }
 
         /* ═══════════════════════════════════════════
            APP BODY
@@ -776,19 +912,20 @@
             <div class="topbar-right">
                 <div id="live-clock" class="live-clock">--:--:--</div>
                 <div class="topbar-meta-block">
-                    <div>OPERATOR&nbsp;<span id="operator-name-display" class="op-name">—</span></div>
+                    <div>OPERATOR&nbsp;<span id="operator-name-display" class="op-name">—</span>&nbsp;·&nbsp;UPTIME&nbsp;<span id="sys-uptime" class="op-name">00:00:00</span></div>
                     <div>
                         <span class="status-dot" id="sys-status-dot"></span>
                         <span id="sys-status" class="status-text good">CONNECTED</span>
+                        <span id="cpu-temp" class="status-text" style="display:none; margin-left: 8px;"></span>
                     </div>
                     <div id="data-stale-warning" class="status-text crit" style="display:none;">⚠ DATA STALE</div>
-                    <div id="cpu-temp" class="status-text" style="display:none;"></div>
+                    <div class="topbar-actions">
+                        <span class="topbar-link" onclick="document.getElementById('settingsModal').style.display='flex'">⚙️ Settings</span>&nbsp;·&nbsp;<span class="topbar-link" onclick="document.getElementById('infoModal').style.display='flex'">❓ Help</span>
+                    </div>
                 </div>
             </div>
         </div>
     </header>
-
-    <div id="station-banner" class="station-banner" role="alert" aria-live="polite" style="display:none;"></div>
 
     <!-- ─── APP BODY ─────────────────────────────────── -->
     <div class="app-body">
@@ -815,6 +952,7 @@
                 <div class="sb-label">Environmental</div>
                 <div id="solar-val" class="env-row">☀ Solar Flare: Loading...</div>
                 <div id="outdoor-temp" class="env-row">🌡 Outdoor: Loading...</div>
+                <div id="sidebar-cpu-temp" class="env-row">🖥 CPU Temp: Loading...</div>
                 <div id="env-metrics" class="env-row">Loading pressure...</div>
             </div>
 
@@ -823,6 +961,8 @@
         <!-- MAIN CONTENT -->
         <main class="main-content">
 
+            <div id="station-banner" class="station-banner" role="alert" aria-live="polite" style="display:none;"></div>
+
             <!-- SCFA Hero ──────────────────────────────── -->
             <section class="scfa-hero" id="scfa-hero-panel">
                 <div class="scfa-top">
@@ -830,7 +970,8 @@
                         <div class="scfa-title-row">
                             <span class="scfa-eyebrow">SCFA — Statistical Cosmic Flux Anomaly</span>
                             <span class="info-dot"
-                                title="Compares the current detection rate against this station's historical baseline (mean ± standard deviation).">?</span>
+                                onclick="document.getElementById('infoModal').style.display='flex'"
+                                title="Click for system information on Grayscale Intensity, SCFA Sigma Levels, and Safety Guards.">?</span>
                         </div>
                         <div class="scfa-badge-wrap">
                             <div id="scfa-badge">CALIBRATING</div>
@@ -877,11 +1018,25 @@
             <section class="panel">
                 <div class="panel-hdr">
                     <div class="panel-title">Live Flux vs. Pressure Correlation</div>
-                    <div class="panel-sub">Last 7 Days&nbsp;·&nbsp;Energy (ADC 0–255)</div>
+                    <div class="panel-sub">Last 7 Days&nbsp;·&nbsp;Intensity (ADC 0–255)</div>
                 </div>
-                <div class="chart-wrap" style="height: 260px;">
+                <div class="chart-wrap" style="height: 240px;">
                     <canvas id="muonChart"></canvas>
                     <div class="chart-fallback" id="muonChartFallback">
+                        Chart library unavailable — check network connection.
+                    </div>
+                </div>
+            </section>
+
+            <!-- Live Temperature & Pressure Graph ──────── -->
+            <section class="panel">
+                <div class="panel-hdr">
+                    <div class="panel-title">Live Environmental Telemetry (Temperature &amp; Pressure)</div>
+                    <div class="panel-sub">Continuous Station Stream&nbsp;·&nbsp;Pressure (hPa) &amp; Outdoor / CPU Temp (°C)</div>
+                </div>
+                <div class="chart-wrap" style="height: 200px;">
+                    <canvas id="envChart"></canvas>
+                    <div class="chart-fallback" id="envChartFallback">
                         Chart library unavailable — check network connection.
                     </div>
                 </div>
@@ -942,6 +1097,43 @@
         <img class="modal-content" id="modalImg" alt="Particle track — enlarged view">
     </div>
 
+    <!-- Help / System Information Modal (v1.5.0) -->
+    <div id="infoModal" class="modal" role="dialog" aria-modal="true" aria-label="System Information" onclick="this.style.display='none'">
+        <div class="dialog-card" onclick="event.stopPropagation()">
+            <h2>System Information</h2>
+
+            <h4>Grayscale Intensity (0–255 ADC)</h4>
+            <p>Values range from 0 (black) to 255 (white) and represent the peak brightness excess of a detected particle trace above the rolling background noise floor (replacing the legacy "Energy" label).</p>
+
+            <h4>SCFA Sigma Levels</h4>
+            <p><strong>NOMINAL:</strong> Flux rate is within 3σ of the station's historical baseline.<br>
+            <strong>3-SIGMA:</strong> Anomaly detected (99.7% confidence deviation).<br>
+            <strong>6-SIGMA:</strong> Critical event, potential geophysical correlation.</p>
+
+            <h4>Safety Guards &amp; Auto-Resume</h4>
+            <p>If the camera lens is uncovered, detection pauses immediately, displays the last 2 critical log messages on the dashboard, and automatically recalibrates (500 frames) and resumes once the lens is covered again. The station also monitors Raspberry Pi CPU temperature (warning at 60°C, thermal halt at 70°C).</p>
+
+            <button class="dialog-btn" onclick="document.getElementById('infoModal').style.display='none'">Close Help</button>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal" role="dialog" aria-modal="true" aria-label="Dashboard Settings" onclick="this.style.display='none'">
+        <div class="dialog-card" style="width: 340px;" onclick="event.stopPropagation()">
+            <h3>Settings</h3>
+            <div style="margin-bottom: 14px;">
+                <label style="font-size: 0.76rem; color: var(--text-dim);">Status Poll Interval (ms)</label>
+                <input type="number" id="refresh-interval-input" value="30000" min="2000" step="1000"
+                    style="width:100%; padding:8px; margin-top:6px; background:var(--bg); color:#fff; border:1px solid var(--border-hi); border-radius:4px;">
+            </div>
+            <div style="margin-bottom: 8px; display:flex; align-items:center; gap: 10px;">
+                <input type="checkbox" id="live-scroll-toggle" checked>
+                <label for="live-scroll-toggle" style="font-size: 0.78rem; color: var(--text);">Live Scroll Environmental Graph</label>
+            </div>
+            <button class="dialog-btn" onclick="applySettingsModal()">Save &amp; Close</button>
+        </div>
+    </div>
+
     <script>
         /* ═══════════════════════════════════════════════════════
            STATION-LOCAL CLOCK + TIMEZONE HELPERS
@@ -979,15 +1171,26 @@
             return keys;
         }
 
+        let backendStartTime = null;
+
         function updateClock() {
             const el = document.getElementById('live-clock');
-            if (!el) return;
-            const now = new Date();
-            el.textContent = now.toLocaleTimeString('en-US', {
-                hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
-                timeZoneName: 'short', ...tzOpt()
-            });
-            el.title = 'UTC ' + now.toISOString().slice(11, 19);
+            if (el) {
+                const now = new Date();
+                el.textContent = now.toLocaleTimeString('en-US', {
+                    hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    timeZoneName: 'short', ...tzOpt()
+                });
+                el.title = 'UTC ' + now.toISOString().slice(11, 19);
+            }
+            const upEl = document.getElementById('sys-uptime');
+            if (upEl && backendStartTime) {
+                const t = Math.max(0, Math.floor((Date.now() - backendStartTime) / 1000));
+                const h = String(Math.floor(t / 3600)).padStart(2, '0');
+                const m = String(Math.floor((t % 3600) / 60)).padStart(2, '0');
+                const s = String(t % 60).padStart(2, '0');
+                upEl.textContent = `${h}:${m}:${s}`;
+            }
         }
         setInterval(updateClock, 1000);
         updateClock();
@@ -1074,6 +1277,7 @@
 
         if (!HAS_CHART) {
             document.getElementById('muonChartFallback').style.display = 'flex';
+            document.getElementById('envChartFallback').style.display = 'flex';
             document.getElementById('rollingChartFallback').style.display = 'flex';
         }
 
@@ -1081,7 +1285,7 @@
             type: 'line',
             data: {
                 datasets: [{
-                    label: 'Energy (ADC)',
+                    label: 'Intensity (ADC)',
                     data: [],
                     backgroundColor: '#3b82f6',
                     borderColor: '#3b82f6',
@@ -1123,11 +1327,73 @@
                             label: (item) => {
                                 const raw = item.raw;
                                 return [
-                                    `Energy: ${raw.y}`,
+                                    `Intensity: ${raw.y} ADC`,
                                     `Pressure: ${raw.pressure ? raw.pressure + ' hPa' : 'N/A'}`
                                 ];
                             }
                         }
+                    }
+                }
+            }
+        }) : null;
+
+        const envChart = HAS_CHART ? new Chart(document.getElementById('envChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    {
+                        label: 'Pressure (hPa)',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: '#3b82f6',
+                        yAxisID: 'yPressure',
+                        pointRadius: 1.5,
+                        borderWidth: 2,
+                        tension: 0.25
+                    },
+                    {
+                        label: 'Outdoor Temp (°C)',
+                        data: [],
+                        borderColor: '#f97316',
+                        backgroundColor: '#f97316',
+                        yAxisID: 'yTemp',
+                        pointRadius: 1.5,
+                        borderWidth: 2,
+                        tension: 0.25
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'minute',
+                            displayFormats: { minute: 'HH:mm', hour: 'MMM dd HH:mm' }
+                        },
+                        grid: { display: false },
+                        ticks: { color: '#6b7280', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    yPressure: {
+                        type: 'linear',
+                        position: 'left',
+                        grid: { color: '#192030' },
+                        ticks: { color: '#3b82f6', font: { family: 'Roboto Mono', size: 10 } }
+                    },
+                    yTemp: {
+                        type: 'linear',
+                        position: 'right',
+                        grid: { drawOnChartArea: false },
+                        ticks: { color: '#f97316', font: { family: 'Roboto Mono', size: 10 } }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        labels: { color: '#8896ae', font: { family: 'Roboto Mono', size: 10 }, boxWidth: 12 }
                     }
                 }
             }
@@ -1362,7 +1628,7 @@
                         div.ondblclick = () => openModal(src, div);
                         div.innerHTML = `
                             <img src="${src}" alt="Particle track">
-                            <div class="hit-info">E: ${hit.max} ADC&nbsp;&middot;&nbsp;${timeStr}</div>
+                            <div class="hit-info">Intensity: ${hit.max} ADC&nbsp;&middot;&nbsp;${timeStr}</div>
                         `;
                         gallery.appendChild(div);
                     });
@@ -1422,23 +1688,129 @@
         // changing, the process has halted or crashed.
         const STATUS_STALE_S = 120;
         const CPU_WARN_C = 60, CPU_HALT_C = 70;   // match THERMAL_SOFT_C / THERMAL_CEILING_C
+        let dismissedAlertKey = null;
 
-        function showBanner(level, text) {
+        function dismissBanner(key) {
+            dismissedAlertKey = key || 'dismissed';
             const b = document.getElementById('station-banner');
+            if (b) b.style.display = 'none';
+        }
+
+        function showBanner(level, badgeText, titleText, lines, timestampMs, alertKey) {
+            const b = document.getElementById('station-banner');
+            if (!b) return;
+            if (alertKey && dismissedAlertKey === alertKey) {
+                b.style.display = 'none';
+                return;
+            }
             b.className = 'station-banner ' + level;
-            b.textContent = text;          // textContent: alert text is never parsed as HTML
+            b.innerHTML = '';
+
+            const hdr = document.createElement('div');
+            hdr.className = 'banner-header';
+
+            const badge = document.createElement('span');
+            badge.className = 'banner-badge';
+            badge.textContent = badgeText;
+            hdr.appendChild(badge);
+
+            const title = document.createElement('span');
+            title.className = 'banner-title';
+            title.textContent = titleText;
+            hdr.appendChild(title);
+
+            if (timestampMs) {
+                const timeEl = document.createElement('span');
+                timeEl.className = 'banner-time';
+                timeEl.textContent = new Date(timestampMs).toLocaleTimeString('en-US', {
+                    hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit', ...tzOpt()
+                });
+                hdr.appendChild(timeEl);
+            }
+
+            const btn = document.createElement('button');
+            btn.className = 'banner-dismiss';
+            btn.textContent = 'Dismiss ×';
+            btn.onclick = () => dismissBanner(alertKey);
+            hdr.appendChild(btn);
+
+            b.appendChild(hdr);
+
+            const msgList = Array.isArray(lines) ? lines.filter(Boolean) : (lines ? [lines] : []);
+            if (msgList.length > 0) {
+                const ul = document.createElement('ul');
+                ul.className = 'alert-lines';
+                msgList.slice(-2).forEach(line => {
+                    const li = document.createElement('li');
+                    li.textContent = line;   // safe textContent
+                    ul.appendChild(li);
+                });
+                b.appendChild(ul);
+            }
+
             b.style.display = 'block';
         }
 
-        // Returns true when the station looks stale (caller shows it as not reporting).
+        function setOutdoorTempDisplay(tempC) {
+            if (typeof tempC !== 'number' || isNaN(tempC)) return;
+            const outdoorF = ((tempC * 9 / 5) + 32).toFixed(1);
+            const el = document.getElementById('outdoor-temp');
+            if (el) el.innerText = `🌡 Outdoor: ${tempC}°C (${outdoorF}°F)`;
+        }
+
+        function updateEnvChartFromStatus(s) {
+            if (!HAS_CHART || !envChart || !s) return;
+            const history = Array.isArray(s.env_history) && s.env_history.length > 0
+                ? s.env_history
+                : (s.timestamp && s.pressure_hpa ? [{
+                    timestamp: Math.round(s.timestamp * 1000),
+                    pressure: s.pressure_hpa,
+                    temp: typeof s.outdoor_temp_c === 'number' ? s.outdoor_temp_c : null
+                }] : []);
+            if (history.length === 0) return;
+
+            envChart.data.datasets[0].data = history
+                .filter(pt => typeof pt.pressure === 'number')
+                .map(pt => ({ x: pt.timestamp, y: pt.pressure }));
+            envChart.data.datasets[1].data = history
+                .filter(pt => typeof pt.temp === 'number')
+                .map(pt => ({ x: pt.timestamp, y: pt.temp }));
+
+            const isLiveScroll = document.getElementById('live-scroll-toggle')?.checked;
+            if (isLiveScroll && history.length > 1) {
+                const latest = history[history.length - 1].timestamp;
+                const spanMs = Math.max(300000, latest - history[0].timestamp);
+                envChart.options.scales.x.min = latest - Math.min(spanMs, 3 * 3600 * 1000);
+                envChart.options.scales.x.max = latest;
+            } else {
+                delete envChart.options.scales.x.min;
+                delete envChart.options.scales.x.max;
+            }
+            envChart.update('none');
+        }
+
+        // Returns true when the station looks stale or halted/paused.
         function applyStationHealth(s, response) {
-            const banner = document.getElementById('station-banner');
-            const temp   = document.getElementById('cpu-temp');
+            const banner      = document.getElementById('station-banner');
+            const temp        = document.getElementById('cpu-temp');
+            const sidebarTemp = document.getElementById('sidebar-cpu-temp');
             if (!s) {
-                banner.style.display = 'none';
-                temp.style.display = 'none';
+                if (banner) banner.style.display = 'none';
+                if (temp) temp.style.display = 'none';
+                if (sidebarTemp) sidebarTemp.innerText = '🖥 CPU Temp: Disconnected';
                 return false;
             }
+
+            if (s.script_start) {
+                backendStartTime = s.script_start;
+                updateClock();
+            }
+
+            if (typeof s.outdoor_temp_c === 'number') {
+                setOutdoorTempDisplay(s.outdoor_temp_c);
+            }
+
+            updateEnvChartFromStatus(s);
 
             // Compare against the Pi's own clock (HTTP Date header from the Pi's
             // web server) so a wrong clock on the viewing computer can't cause
@@ -1452,28 +1824,53 @@
                 (ageS < 3600 ? Math.round(ageS / 60) + ' min' : (ageS / 3600).toFixed(1) + ' h');
 
             if (typeof s.cpu_temp_c === 'number' && s.cpu_temp_c > 0) {
-                temp.textContent = 'CPU ' + s.cpu_temp_c.toFixed(1) + '°C';
+                const c = s.cpu_temp_c.toFixed(1);
+                const f = ((s.cpu_temp_c * 9 / 5) + 32).toFixed(1);
+                temp.textContent = 'CPU ' + c + '°C';
                 temp.className = 'status-text' + (s.cpu_temp_c >= CPU_HALT_C ? ' crit' : s.cpu_temp_c >= CPU_WARN_C ? ' warn' : '');
                 temp.style.display = '';
+                if (sidebarTemp) {
+                    const tier = s.cpu_temp_c >= CPU_HALT_C ? ' [CRITICAL]' : s.cpu_temp_c >= CPU_WARN_C ? ' [WARN]' : '';
+                    sidebarTemp.innerText = `🖥 CPU Temp: ${c}°C (${f}°F)${tier}`;
+                }
             } else {
                 temp.style.display = 'none';
+                if (sidebarTemp) sidebarTemp.innerText = '🖥 CPU Temp: N/A';
             }
 
-            if (s.alert) {
-                showBanner('crit', '⚠ STATION HALTED — ' + s.alert + (stale ? ' (last update ' + ageTxt + ' ago)' : ''));
+            const alertLines = (Array.isArray(s.alerts) && s.alerts.length > 0)
+                ? s.alerts.slice(-2)
+                : (s.alert ? [s.alert] : []);
+            const alertTs = s.alert_timestamp || (s.timestamp ? s.timestamp * 1000 : Date.now());
+            const alertKey = alertLines.join('|') + '|' + (s.alert_timestamp || '');
+
+            if (alertLines.length > 0) {
+                const isPaused = !!s.paused;
+                const badgeText = isPaused ? 'PAUSED — LENS UNCOVERED' : 'CRITICAL ALERT';
+                const titleText = isPaused
+                    ? 'Detection paused — cover the camera lens to automatically recalibrate and resume'
+                    : ('Station Halted' + (stale ? ' (last update ' + ageTxt + ' ago)' : ''));
+                showBanner('crit', badgeText, titleText, alertLines, alertTs, alertKey);
             } else if (stale) {
-                showBanner('crit', '⚠ STATION NOT REPORTING — no status update for ' + ageTxt +
-                    '. The detector may have stopped; check the Pi.');
+                showBanner('crit', 'STATION NOT REPORTING', 'No status update for ' + ageTxt, [
+                    'The detector process has not updated status.json for ' + ageTxt + '. Check the Raspberry Pi.'
+                ], nowMs, 'stale-' + Math.floor(ageS / 60));
             } else if (s.calibrating) {
-                showBanner('info', 'Calibrating: ' + (s.calibration_progress || 0) + ' / ' +
-                    (s.calibration_frames || 500) + ' frames — detection starts when complete.');
+                dismissedAlertKey = null;
+                showBanner('info', 'CALIBRATING',
+                    'Background model calibration in progress (' + (s.calibration_progress || 0) + ' / ' + (s.calibration_frames || 500) + ' frames)',
+                    ['Detection will start automatically once calibration and lens-cover verification complete.'],
+                    nowMs, null);
             } else if (typeof s.cpu_temp_c === 'number' && s.cpu_temp_c >= CPU_WARN_C) {
-                showBanner('warn', 'CPU temperature ' + s.cpu_temp_c.toFixed(1) + '°C is above the ' + CPU_WARN_C +
-                    '°C warning level (the station halts at ' + CPU_HALT_C + '°C).');
+                showBanner('warn', 'THERMAL WARNING',
+                    'CPU temperature ' + s.cpu_temp_c.toFixed(1) + '°C exceeds ' + CPU_WARN_C + '°C soft limit',
+                    [`[THERMAL] CPU ${s.cpu_temp_c.toFixed(1)}°C above soft limit ${CPU_WARN_C}°C (station halts at ${CPU_HALT_C}°C).`],
+                    nowMs, 'warn-' + Math.round(s.cpu_temp_c));
             } else {
+                dismissedAlertKey = null;
                 banner.style.display = 'none';
             }
-            return stale || !!s.alert;
+            return stale || alertLines.length > 0;
         }
 
         async function updateConnectionStatus() {
@@ -1497,9 +1894,13 @@
                     refreshDashboard();
                 }
 
-                const halted = applyStationHealth(statusData, r);
+                const haltedOrPaused = applyStationHealth(statusData, r);
 
-                if (halted) {
+                if (statusData.paused) {
+                    label.innerText   = "PAUSED (LENS)";
+                    label.className   = "status-text warn";
+                    dot.style.background = "var(--warn)";
+                } else if (haltedOrPaused) {
                     label.innerText   = "NOT REPORTING";
                     label.className   = "status-text crit";
                     dot.style.background = "var(--crit)";
@@ -1535,12 +1936,15 @@
 
         async function updateWeather() {
             try {
-                let lat = 40.7128, lng = -74.0060, locName = "NYC";
+                let lat = 40.7128, lng = -74.0060;
                 try {
                     const statusRes = await fetch('status.json?t=' + Date.now());
                     if (statusRes.ok) {
                         const s = await statusRes.json();
-                        if (s.lat && s.lng) { lat = s.lat; lng = s.lng; locName = "Station"; }
+                        if (s.lat && s.lng) { lat = s.lat; lng = s.lng; }
+                        if (typeof s.outdoor_temp_c === 'number') {
+                            setOutdoorTempDisplay(s.outdoor_temp_c);
+                        }
                     }
                 } catch (e) { /* fall back to default coords */ }
 
@@ -1551,12 +1955,13 @@
                 const current  = d.current || {};
                 const outdoorC = current.temperature_2m;
                 if (outdoorC !== undefined) {
-                    const outdoorF = ((outdoorC * 9 / 5) + 32).toFixed(1);
-                    document.getElementById('outdoor-temp').innerText =
-                        `🌡 ${locName}: ${outdoorC}°C (${outdoorF}°F)`;
+                    setOutdoorTempDisplay(outdoorC);
                 }
             } catch (e) {
-                document.getElementById('outdoor-temp').innerText = '🌡 Outdoor: Unavailable';
+                const el = document.getElementById('outdoor-temp');
+                if (el && el.innerText.includes('Loading')) {
+                    el.innerText = '🌡 Outdoor: Unavailable';
+                }
             }
         }
 
@@ -1577,7 +1982,29 @@
         }
 
         function handleModalKeydown(e) {
-            if (e.key === 'Escape') closeModal();
+            if (e.key === 'Escape') {
+                closeModal();
+                document.getElementById('infoModal').style.display = 'none';
+                document.getElementById('settingsModal').style.display = 'none';
+            }
+        }
+
+        let statusTimer = null;
+        let dashTimer = null;
+
+        function startPollTimers(intervalMs = 30000) {
+            if (statusTimer) clearInterval(statusTimer);
+            if (dashTimer) clearInterval(dashTimer);
+            dashTimer   = setInterval(refreshDashboard, intervalMs);
+            statusTimer = setInterval(updateConnectionStatus, intervalMs);
+        }
+
+        function applySettingsModal() {
+            const input = document.getElementById('refresh-interval-input');
+            const ms = Math.max(2000, parseInt(input?.value || '30000', 10) || 30000);
+            startPollTimers(ms);
+            updateConnectionStatus();
+            document.getElementById('settingsModal').style.display = 'none';
         }
 
         // Initial load
@@ -1587,10 +2014,9 @@
         updateWeather();
 
         // Refresh intervals
-        setInterval(refreshDashboard,        30000);
-        setInterval(updateConnectionStatus,  30000);
-        setInterval(updateSolar,            600000);
-        setInterval(updateWeather,          900000);
+        startPollTimers(30000);
+        setInterval(updateSolar,   600000);
+        setInterval(updateWeather, 900000);
     </script>
 
 </body>

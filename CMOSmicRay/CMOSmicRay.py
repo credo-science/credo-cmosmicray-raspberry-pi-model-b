@@ -168,30 +168,35 @@ class AppConfig:
     hot_pixel_radius: int = 3
 
     @classmethod
-    def from_env(cls, base_dir):
+    def from_env(cls, base_dir, exit_on_error=True):
         """Loads and validates configuration from the environment. Exits the
-        process with an actionable message on missing/invalid values.
+        process with an actionable message on missing/invalid values (or raises
+        ValueError when exit_on_error=False for live-reload).
 
         This is the production entrypoint's fail-fast startup check -- it's
         only ever called under `__main__` (not at module scope), so
         `import CMOSmicRay` from a test file never triggers it even when
         .env isn't present.
         """
+        def _fail(msg):
+            logging.error(msg)
+            if exit_on_error:
+                sys.exit(1)
+            raise ValueError(msg)
+
         missing = [name for name in _REQUIRED_ENV if not os.getenv(name)]
         if missing:
-            logging.error(
+            _fail(
                 f"[CONFIG] Missing required environment variable(s): {', '.join(missing)}. "
                 f"Copy .env.example to .env and fill in your CREDO credentials/location, "
                 f"or export them before launching."
             )
-            sys.exit(1)
         try:
             lat = float(os.getenv("CREDO_LAT"))
             lng = float(os.getenv("CREDO_LNG"))
             alt = float(os.getenv("CREDO_ALT"))
         except ValueError:
-            logging.error("[CONFIG] CREDO_LAT/CREDO_LNG/CREDO_ALT must be numeric.")
-            sys.exit(1)
+            _fail("[CONFIG] CREDO_LAT/CREDO_LNG/CREDO_ALT must be numeric.")
 
         profile_key, profile = _select_camera_profile(os.getenv("CREDO_CAMERA_MODEL", "Logitech C920"))
 
@@ -199,9 +204,9 @@ class AppConfig:
             try:
                 return cast(float(os.getenv(name, default)))
             except ValueError:
-                logging.error(f"[CONFIG] {name} must be numeric.")
-                sys.exit(1)
+                _fail(f"[CONFIG] {name} must be numeric.")
 
+        ceiling_default = os.getenv("CREDO_THERMAL_CEILING", 70.0)
         return cls(
             station_id=os.getenv("CREDO_STATION"),
             credo_user=os.getenv("CREDO_USER"),
@@ -216,7 +221,7 @@ class AppConfig:
             obscuration_avg_max=_num("OBSCURATION_AVG_MAX", 10.0),
             obscuration_black_min=_num("OBSCURATION_BLACK_MIN", 0.05),
             thermal_soft_c=_num("THERMAL_SOFT_C", 60.0),
-            thermal_ceiling_c=_num("THERMAL_CEILING_C", 70.0),
+            thermal_ceiling_c=_num("THERMAL_CEILING_C", ceiling_default),
             thermal_check_interval=_num("THERMAL_CHECK_INTERVAL", 30, int),
             stats_window_s=_num("STATS_WINDOW_S", 3600, int),
             station_tz=detect_timezone_name(),
@@ -242,6 +247,9 @@ PING_INTERVAL = 600
 LOGIN_RETRY_BASE = 5
 LOGIN_RETRY_MAX = 300  # cap re-login backoff at 5 minutes
 LOOP_PROFILE_INTERVAL = 60  # seconds between capture-loop profiling summaries
+THERMAL_LOG_INTERVAL = 300  # seconds between routine [THERMAL] info log lines (5 min)
+OBSCURATION_RESUME_POLL_S = 1.0  # seconds between frame checks while paused waiting for lens cover
+ENV_WATCH_INTERVAL = 2.0  # seconds between .env modification checks
 
 # --- STATE ---
 SCRIPT_START = int(time.time() * 1000); LAST_PING = SCRIPT_START
@@ -314,6 +322,8 @@ class LocalStore:
     """
 
     MAX_DETECTIONS = 1000
+    MAX_ALERTS = 2
+    MAX_TELEMETRY_POINTS = 360  # ~3 hours at 30 s intervals
 
     def __init__(self, public_dir):
         self.log_file = os.path.join(public_dir, "detections.json")
@@ -323,8 +333,37 @@ class LocalStore:
         self.archive_file = os.path.join(os.path.dirname(os.path.abspath(public_dir)), "detections_archive.jsonl")
         self.queue = queue.Queue()
         # Safety-gate state merged into status.json for the dashboard
-        # (calibration progress, CPU temp, last critical alert).
+        # (calibration progress, CPU temp, last 2 critical alerts, telemetry).
         self.status_extra = {}
+        self.recent_alerts = collections.deque(maxlen=self.MAX_ALERTS)
+        self.env_history = collections.deque(maxlen=self.MAX_TELEMETRY_POINTS)
+
+    def record_alert(self, *messages):
+        """Stores up to the last 2 critical alert lines for dashboard display."""
+        for m in messages:
+            if m:
+                self.recent_alerts.append(str(m))
+        if self.recent_alerts:
+            self.status_extra["alerts"] = list(self.recent_alerts)
+            self.status_extra["alert"] = self.recent_alerts[-1]
+            self.status_extra["alert_timestamp"] = int(time.time() * 1000)
+
+    def clear_alert(self):
+        """Clears active critical alerts once the station recovers."""
+        self.recent_alerts.clear()
+        self.status_extra["alerts"] = []
+        self.status_extra["alert"] = None
+        self.status_extra["paused"] = False
+
+    def record_telemetry(self, environment, cpu_temp_c=None, now_ms=None):
+        """Appends a live temperature/pressure telemetry point for the dashboard graph."""
+        ts_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        self.env_history.append({
+            "timestamp": ts_ms,
+            "pressure": environment.pressure_hpa,
+            "temp": environment.outdoor_temp_c,
+            "cpu_temp_c": cpu_temp_c,
+        })
 
     def append_archive(self, detection_data):
         """Crash-safe permanent record: one metadata-only JSON line per hit
@@ -385,9 +424,11 @@ class LocalStore:
             **self.status_extra,
             "connected": is_connected,
             "timestamp": time.time(),
+            "script_start": SCRIPT_START,
             "station": config.station_id,
             "operator": config.credo_user,
             "pressure_hpa": environment.pressure_hpa,
+            "outdoor_temp_c": environment.outdoor_temp_c,
             "camera_model": config.camera_profile_key,
             "timezone": config.station_tz or None,
             # Rounded to ~1km precision -- this file is served
@@ -398,6 +439,8 @@ class LocalStore:
             "lat": round(config.lat, 2) if config.lat is not None else None,
             "lng": round(config.lng, 2) if config.lng is not None else None
         }
+        if self.env_history:
+            doc["env_history"] = list(self.env_history)
         try:
             tmp_path = self.status_file + ".tmp"
             with open(tmp_path, "w") as f:
@@ -604,6 +647,10 @@ class CalibrationGate:
         self.count += 1
         return self.done
 
+    def reset(self):
+        """Restarts calibration from zero (used after lens-cover recovery)."""
+        self.count = 0
+
 
 class TraceLogger:
     """Rotating CSV of every candidate (accepted / rejected / near-miss) for
@@ -764,8 +811,15 @@ def tune_driver(profile_key, profile):
 def get_temp():
     try:
         raw = subprocess.check_output(["vcgencmd", "measure_temp"]).decode()
-        return float(raw.replace("temp=", "").replace("'C\n", ""))
+        val = float(raw.replace("temp=", "").replace("'C\n", ""))
+        if val > 0.0:
+            return val
     except (subprocess.SubprocessError, OSError, ValueError):
+        pass
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", encoding="utf-8") as f:
+            return round(float(f.read().strip()) / 1000.0, 1)
+    except (OSError, ValueError):
         return 0.0
 
 
@@ -919,7 +973,7 @@ def process_hit(frame, x, y, max_val):
 
     upload_executor.submit(upload_worker, cloud_payload)
     store.queue.put(local_payload)
-    logging.info(f"[HIT] Energy:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
+    logging.info(f"[HIT] Intensity:{max_val} | P:{current_pressure}hPa | Outdoor:{current_outdoor_temp}C")
 
 
 def shutdown(cap):
@@ -973,38 +1027,167 @@ def _record_loop_time(compute_elapsed, total_elapsed):
         p["window_start"] = now
 
 
-def halt(reason):
-    """Critical stop: log it, publish it to status.json so the dashboard can
-    show why, then exit non-zero. The program does not restart itself: whatever launched it
-    (a service manager, or a cron watchdog running start_CMOSmicRay.sh) must do so, otherwise the
-    station stays offline until started by hand or the Pi reboots."""
+def halt(reason, extra_line=None):
+    """Critical stop: log up to 2 alert lines, publish them to status.json so
+    the dashboard displays both messages, then exit non-zero."""
+    if extra_line:
+        logging.critical(extra_line)
     logging.critical(reason)
     if live_stats is not None:
         live_stats.flush(time.time())
-    store.status_extra["alert"] = reason
+    if extra_line:
+        store.record_alert(extra_line, reason)
+    else:
+        store.record_alert(reason)
     store.update_status(bool(auth.get_token()), config, environment)
     sys.exit(1)
 
 
-def verify_obscuration(gray, context):
-    """Halts the process if the lens is not covered."""
+def format_obscuration_alerts(context, avg, avg_max, black, black_min, auto_resume=True):
+    """Formats the two CRITICAL obscuration log messages for the log and dashboard."""
+    msg1 = (
+        f"[OBSCURATION] FAIL ({context}) — avg_brightness={avg:.2f} "
+        f"(limit <= {avg_max}), "
+        f"black_density={black * 1000:.1f} per mille (limit >= {black_min * 1000:.0f})"
+    )
+    if auto_resume:
+        msg2 = (
+            "[OBSCURATION] PAUSED — Camera lens does not appear to be covered. "
+            "Cover the lens completely to automatically recalibrate and resume."
+        )
+    else:
+        msg2 = (
+            "[OBSCURATION] ABORT — Camera lens does not appear to be covered. "
+            "Cover the lens completely and restart the application."
+        )
+    return msg1, msg2
+
+
+def verify_obscuration(gray, context, auto_resume=True):
+    """Checks that the camera lens is covered.
+
+    When `auto_resume` is True (default), an uncovered lens logs two CRITICAL
+    messages, records both in status.json (`alerts`), flushes live_stats, and
+    returns False so the main loop pauses detection and automatically resumes
+    with a fresh calibration once the lens is covered again. When `auto_resume`
+    is False, it halts the process with sys.exit(1).
+    """
     ok, avg, black = check_obscuration(gray, config.obscuration_avg_max, config.obscuration_black_min)
+    if ok:
+        return True
+    msg1, msg2 = format_obscuration_alerts(
+        context, avg, config.obscuration_avg_max, black, config.obscuration_black_min,
+        auto_resume=auto_resume,
+    )
+    if not auto_resume:
+        halt(msg2, extra_line=msg1)
+    logging.critical(msg1)
+    logging.critical(msg2)
+    if live_stats is not None:
+        live_stats.flush(time.time())
+        live_stats.window_start = None
+    store.record_alert(msg1, msg2)
+    store.status_extra["paused"] = True
+    store.status_extra["calibrating"] = False
+    store.update_status(bool(auth.get_token()), config, environment)
+    return False
+
+
+def recover_if_obscured(gray, detector, calibration):
+    """Checks if a paused detector's lens is now covered again. If so, clears
+    the alert, resets the background model and calibration gate, and returns True."""
+    ok, _, _ = check_obscuration(gray, config.obscuration_avg_max, config.obscuration_black_min)
     if not ok:
-        halt(f"[OBSCURATION] ABORT ({context}) -- lens does not appear covered: "
-             f"avg_brightness={avg:.2f} (limit <= {config.obscuration_avg_max}), "
-             f"black_ratio={black:.3f} (limit >= {config.obscuration_black_min}). "
-             f"Cover the lens completely and restart.")
+        return False
+    logging.info("[OBSCURATION] Lens cover restored — restarting calibration gate.")
+    detector.bg_frame = None
+    calibration.reset()
+    store.clear_alert()
+    store.status_extra.update(
+        calibrating=True,
+        calibration_progress=0,
+        calibration_frames=config.calibration_frames,
+    )
+    store.update_status(bool(auth.get_token()), config, environment)
+    return True
 
 
-def check_thermal():
+_last_thermal_log = 0.0
+
+
+def check_thermal(now=None):
+    global _last_thermal_log
+    now = time.time() if now is None else now
     cpu_temp = get_temp()
     store.status_extra["cpu_temp_c"] = cpu_temp
+    store.record_telemetry(environment, cpu_temp_c=cpu_temp, now_ms=int(now * 1000))
     state = thermal_state(cpu_temp, config.thermal_soft_c, config.thermal_ceiling_c)
     if state == "HALT":
-        halt(f"[THERMAL] CPU {cpu_temp}C exceeds the {config.thermal_ceiling_c}C ceiling. "
-             f"Halting; the process exits and must be restarted by its supervisor.")
+        msg1 = (
+            f"[THERMAL] FAIL — CPU temperature {cpu_temp:.1f}°C exceeds "
+            f"{config.thermal_ceiling_c}°C ceiling (soft limit {config.thermal_soft_c}°C)."
+        )
+        msg2 = (
+            f"[THERMAL] ABORT — Halting process to protect hardware. "
+            f"The process exits and must be restarted by its supervisor."
+        )
+        halt(msg2, extra_line=msg1)
     elif state == "WARN":
-        logging.warning(f"[THERMAL] CPU {cpu_temp}C above soft limit {config.thermal_soft_c}C.")
+        logging.warning(f"[THERMAL] CPU {cpu_temp:.1f}°C above soft limit {config.thermal_soft_c}°C.")
+        _last_thermal_log = now
+    elif (now - _last_thermal_log) >= THERMAL_LOG_INTERVAL or _last_thermal_log == 0.0:
+        logging.info(
+            f"[THERMAL] CPU temperature: {cpu_temp:.1f}°C "
+            f"(soft limit {config.thermal_soft_c}°C, ceiling {config.thermal_ceiling_c}°C)"
+        )
+        _last_thermal_log = now
+
+
+class EnvWatcher:
+    """Monitors .env for live changes (operator credentials, station ID,
+    location, or safety thresholds) and reloads AppConfig in-place without
+    interrupting detection."""
+
+    def __init__(self, base_dir):
+        self.base_dir = base_dir
+        self.env_path = os.path.join(base_dir, ".env")
+        self.last_mtime = self._get_mtime()
+
+    def _get_mtime(self):
+        try:
+            return os.path.getmtime(self.env_path) if os.path.exists(self.env_path) else 0.0
+        except OSError:
+            return 0.0
+
+    def check_reload(self, current_config, auth_state, local_store, env_state):
+        """Checks if .env was modified; if so, reloads and returns the updated
+        AppConfig (or `current_config` if unchanged or invalid)."""
+        mtime = self._get_mtime()
+        if mtime <= self.last_mtime:
+            return current_config
+        self.last_mtime = mtime
+        try:
+            load_dotenv(dotenv_path=self.env_path, override=True)
+            new_cfg = AppConfig.from_env(self.base_dir, exit_on_error=False)
+        except ValueError as e:
+            logging.warning(f"[CONFIG] Ignored invalid .env update; keeping previous config: {e}")
+            return current_config
+
+        creds_changed = (
+            new_cfg.credo_user != current_config.credo_user
+            or new_cfg.credo_pass != current_config.credo_pass
+            or new_cfg.station_id != current_config.station_id
+        )
+        if creds_changed:
+            auth_state.clear_token()
+            logging.info(
+                f"[CONFIG] Live .env update detected (Station: {new_cfg.station_id} | "
+                f"Operator: {new_cfg.credo_user}). Re-authenticating..."
+            )
+        elif new_cfg != current_config:
+            logging.info("[CONFIG] Live .env update applied.")
+        local_store.update_status(bool(auth_state.get_token()), new_cfg, env_state)
+        return new_cfg
 
 
 if __name__ == "__main__":
@@ -1015,6 +1198,7 @@ if __name__ == "__main__":
     tune_driver(config.camera_profile_key, config.camera_profile)
     threading.Thread(target=ping, daemon=True).start()
     threading.Thread(target=store.writer_loop, daemon=True).start()
+    env_watcher = EnvWatcher(BASE_DIR)
 
     cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
     cap.set(3, config.capture_width); cap.set(4, config.capture_height); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -1040,22 +1224,42 @@ if __name__ == "__main__":
     # so skip the (comparatively costly) scan on the vast majority of frames.
     scan_floor = min(profile["ratio_min"], profile["min_absolute"] * NEAR_MISS_FRACTION)
     last_thermal_check = 0.0
+    last_env_watch = 0.0
     last_obscuration_check = time.time()
+    obscuration_paused = False
     store.status_extra.update(calibrating=True, calibration_progress=0,
-                              calibration_frames=config.calibration_frames)
+                              calibration_frames=config.calibration_frames,
+                              paused=False, alerts=[], alert=None)
 
     while True:
         iter_start = time.time()
+        if iter_start - last_env_watch >= ENV_WATCH_INTERVAL:
+            last_env_watch = iter_start
+            config = env_watcher.check_reload(config, auth, store, environment)
+            profile = config.camera_profile
+            scan_floor = min(profile["ratio_min"], profile["min_absolute"] * NEAR_MISS_FRACTION)
+
         ret, frame = cap.read()
         if not ret: time.sleep(1); continue
         compute_start = time.time()
 
         if iter_start - last_thermal_check >= config.thermal_check_interval:
             last_thermal_check = iter_start
-            check_thermal()
+            check_thermal(iter_start)
             store.update_status(bool(auth.get_token()), config, environment)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Paused due to uncovered lens: wait for the lens to be covered again,
+        # then automatically recalibrate and resume detection.
+        if obscuration_paused:
+            if recover_if_obscured(gray, detector, calibration):
+                obscuration_paused = False
+                last_obscuration_check = time.time()
+            else:
+                time.sleep(OBSCURATION_RESUME_POLL_S)
+            continue
+
         result = detector.detect(gray)
         if result is None:
             continue
@@ -1067,7 +1271,9 @@ if __name__ == "__main__":
                 logging.info(f"[CAL] {calibration.count}/{config.calibration_frames} frames")
             store.status_extra["calibration_progress"] = calibration.count
             if just_finished:
-                verify_obscuration(gray, "end of calibration")
+                if not verify_obscuration(gray, "end of calibration"):
+                    obscuration_paused = True
+                    continue
                 store.status_extra["calibrating"] = False
                 store.update_status(bool(auth.get_token()), config, environment)
                 last_obscuration_check = time.time()
@@ -1078,7 +1284,9 @@ if __name__ == "__main__":
         # Periodic sweep: catches the lens cap coming off mid-run.
         if iter_start - last_obscuration_check >= OBSCURATION_SWEEP_S:
             last_obscuration_check = iter_start
-            verify_obscuration(gray, "periodic sweep")
+            if not verify_obscuration(gray, "periodic sweep"):
+                obscuration_paused = True
+                continue
 
         live_stats.frame()
         live_stats.maybe_flush(iter_start)
@@ -1095,7 +1303,9 @@ if __name__ == "__main__":
                 hot_mask.record(ev_x, ev_y)
         if accepted:
             # Per-hit gate: never upload a hit if the lens is exposed right now.
-            verify_obscuration(gray, "per-hit")
+            if not verify_obscuration(gray, "per-hit"):
+                obscuration_paused = True
+                continue
             for ev_val, ev_x, ev_y in accepted:
                 process_hit(diff, ev_x, ev_y, ev_val)
             time.sleep(0.5)

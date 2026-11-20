@@ -110,15 +110,16 @@ tail -f CMOSmicRay.log
 * `[HARDWARE] Tuning driver...` -> Confirms camera settings are being applied.
 * `[AUTH] Login Successful.` -> Confirms connection to CREDO API v2.
 * `[NET] Ping Sent.` -> Confirms the 10-minute heartbeat.
-* `[HIT] Energy: ...` -> Confirms a cosmic ray detection.
+* `[HIT] Intensity: ...` -> Confirms a cosmic ray detection.
+* `[THERMAL] CPU temperature: ...` -> Logged at startup and every 5 minutes (warning above 60 °C, halt above 70 °C).
 * `[PROFILE] Capture loop: ...` -> Logged every 60s. Shows the detection loop's actual iteration rate and cv2 compute cost on your hardware -- useful if you're evaluating whether the loop needs throttling on constrained devices (Pi Zero/Model B).
 
-To start the detector at boot and bring it back after a halt (lens check or overheating) or a crash, add these to `crontab -e`. The start script does nothing if the detector is already running, so the watchdog is safe to run often:
+To start the detector at boot and bring it back after a thermal halt or unexpected crash, add these to `crontab -e`. The start script does nothing if the detector is already running, so the watchdog is safe to run often:
 ```bash
 @reboot /home/<user>/CMOSmicRay/start_CMOSmicRay.sh
 */5 * * * * /home/<user>/CMOSmicRay/start_CMOSmicRay.sh >> /home/<user>/CMOSmicRay/watchdog.log 2>&1
 ```
-With the lens uncovered the detector restarts about every 5 minutes, calibrates and halts again without uploading anything.
+(If the camera lens is uncovered, the detector pauses in-process, displays the last 2 critical messages on the dashboard, and automatically recalibrates and resumes once the lens is covered again.)
 
 Since `start_CMOSmicRay.sh` redirects output to `CMOSmicRay.log` via `nohup ... >>` with no rotation, that file grows unbounded on an unattended, weeks-long deployment. Install the provided `logrotate` config to cap it:
 ```bash
@@ -144,10 +145,11 @@ A candidate is accepted if its peak is `>= min_absolute`, **or** `>= ratio_thres
 
 ### Detection Pipeline and Safety Gates
 1. **Calibration** -- the first 500 frames only settle the background model; no detection yet.
-2. **Lens check** -- mean brightness must be `<= 10` and at least 5% of pixels near-black. Checked at the end of calibration, every 10 minutes, and before every hit is uploaded. On failure the process exits with status 1 and the reason is published in `status.json`. It does not restart itself: use a service manager, or the cron watchdog described under *Monitoring* below, otherwise the station stays offline until restarted by hand.
+2. **Lens check (Auto-Resume)** -- mean brightness must be `<= 10` and at least 5% of pixels near-black. Checked at the end of calibration, every 10 minutes, and before every hit is uploaded. On failure detection pauses, the last 2 critical log messages (`[OBSCURATION] FAIL ...` and `[OBSCURATION] PAUSED ...`) are published in `status.json` (`alerts`) and shown in a banner on the dashboard, and once the lens is covered again the detector automatically resets its background model, runs a fresh 500-frame calibration, and resumes.
 3. **Candidate scan** -- up to 3 traces per frame; after each accepted trace its 64x64 ROI is blacked out and the frame is re-scanned.
 4. **Filters** -- 3x3 spatial test (rejects isolated hot pixels), then the **hot-pixel mask**: any position that yields 5 accepted hits is treated as a sensor defect and masked (`REJECTED_HOT`). Learned positions persist in `hot_pixels.json`, kept separately per capture size.
-5. **Thermal protection** -- warning at 60 C, exit at 70 C (checked every 30 s).
+5. **Thermal protection** -- routine `[THERMAL]` CPU temperature log every 5 minutes, warning at 60 C, and protective exit at 70 C (checked every 30 s).
+6. **Live `.env` reload** -- changes to `.env` (e.g. operator credentials or station ID) are detected and reloaded automatically without restarting the detector.
 
 ### Capture Size
 The default is **640x480**. Long-run data showed single-pixel hot spots producing 65% of accepted hits at 1280x720 but 1% at 640x480. Override with `CAPTURE_WIDTH` / `CAPTURE_HEIGHT`; the Pi Model B processes about 6 frames/s at 640x480 versus about 2 at 1280x720.

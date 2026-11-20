@@ -5,33 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.5] - 2026-11-16
-Covers the 1.7.x series (1.7.1 – 1.7.5). Builds on the refactored, tested code base from `f8d7f2f`, which had dropped the safety and filtering features of 1.3–1.6; those are restored here.
+## [1.7.5] - 2026-11-18
+Deployed on the station on 15 Nov 2026; updated on 18 Nov 2026 following code review to restore full v1.2–v1.6 feature parity and add automatic lens-cover recovery.
 
 ### Added
-- **Safety gates restored in the refactored code**: 500-frame calibration gate, dual-condition lens-cover check (end of calibration, every 600 s, and before every upload), tiered thermal protection (warn 60 °C, halt 70 °C), 3×3 spatial filter, adaptive thresholds (`min_absolute`, `ratio_threshold`, `ratio_min`) and up to 3 traces per frame. All limits are configurable from `.env` (see `.env.example`).
-- **Hot-pixel mask**: a position that yields 5 accepted hits (`HOT_PIXEL_MIN_HITS`) is treated as a sensor defect and every candidate within 3 px (`HOT_PIXEL_RADIUS`) is rejected as `REJECTED_HOT`. Positions are kept per capture size in `hot_pixels.json`. Long-run data showed fixed hot spots producing 65 % of accepted hits at 1280×720 against 1 % at 640×480.
-- **Live-time log**: `live_stats.csv` gets one row per hour (`STATS_WINDOW_S`) with frames processed, hits by status, capture size, requested and camera-reported exposure/gain and software version, so detection rates can be given per live hour.
-- **Local timestamps**: `trace_diagnostics.csv` and `live_stats.csv` keep UTC and add a station-local column with its UTC offset. The station timezone is detected (`STATION_TZ`, `/etc/timezone`, `/etc/localtime`) and published in `status.json`; the dashboard shows station-local time. A CSV with an older column layout is moved to `*.legacy-<timestamp>.csv` instead of being mixed with the new layout.
-- **Permanent archive and trace log** (`detections_archive.jsonl`, `trace_diagnostics.csv`), kept outside `public/` so the dashboard web server does not serve them.
-- **Dashboard** (now `public/dashboard.html`): station-local clock and day buckets, CPU temperature, and a banner when the station is halted or not reporting.
-- **Tooling**: 74 pytest tests, a GitHub Actions workflow, `requirements.txt` / `requirements-dev.txt`, a `logrotate` rule (`packaging/`), and README sections on the safety gates, settings, output files and a cron watchdog.
+- **Automatic Lens-Cover Recovery (Auto-Resume) & 2-Line Critical Dashboard Alerts**: Uncovering the camera lens now logs the two `CRITICAL` messages (`[OBSCURATION] FAIL ...` with `avg_brightness` and `black_density per mille`, and `[OBSCURATION] PAUSED ...`), publishes both lines in `status.json` (`alerts`), renders them in a prominent banner at the top of `public/dashboard.html`, and pauses detection. Once the lens is covered again, the detector automatically resets its background model, runs a fresh 500-frame calibration, clears the alert banner, and resumes detection without requiring a manual restart.
+- **Routine CPU Temperature Logging & Sidebar Readout**: `check_thermal()` now logs a `[THERMAL] CPU temperature: XX.X°C (soft limit 60.0°C, ceiling 70.0°C)` info message at startup and every 5 minutes (`THERMAL_LOG_INTERVAL = 300`), falls back to `/sys/class/thermal/thermal_zone0/temp` when `vcgencmd` is unavailable, and displays CPU temperature explicitly in both the topbar and the Environmental sidebar (`🖥 CPU Temp:`).
+- **Live Environmental Telemetry Graph, Uptime Ticker & `.env` Live-Reload Watcher Restored**:
+  - `LocalStore.record_telemetry()` maintains a rolling history (`env_history` in `status.json`) of barometric pressure and temperature, driving the dual-axis **Live Environmental Telemetry (Temperature & Pressure)** chart (`#envChart`) via HTTP polling (no `websockets` daemon required).
+  - Restored `EnvWatcher` to monitor `.env` every 2 seconds and reload `AppConfig` live (re-authenticating when credentials or station ID change, while safely ignoring partial/invalid edits).
+  - Restored the live `UPTIME` counter (`#sys-uptime`), the v1.5.0 `❓ Help` (`#infoModal`) and `⚙️ Settings` (`#settingsModal`) modals, and the `"Intensity (ADC)"` terminology across logs and the dashboard.
 
 ### Changed
-- **Default capture size is 640×480** (`CAPTURE_WIDTH`, `CAPTURE_HEIGHT`). Expect about 6 processed frames/s on a Raspberry Pi Model B, against about 2 at 1280×720.
-- **C270 profile requests exposure 660.** The camera clamps anything above 666 while streaming, so the earlier request of 1000 was never applied.
-- **Start and stop scripts** match the detector and the dashboard server by the start of their command line, so a shell or ssh session that merely mentions the file name is no longer mistaken for the detector. The dashboard server serves only `public/`, and credentials are read from `.env`.
-- A halt (lens uncovered, CPU above the limit) writes its reason to `status.json` and exits with status 1. **The program does not restart itself**; use a service manager or the cron watchdog described in the README.
+- **C270 profile requests exposure `660` (`1325db7`, 2026-11-15)**: Diagnostic readback from v1.7.4 showed the Logitech C270 UVC driver clamps `exposure_time_absolute` at `666` (`66.6 ms`) while streaming at `640×480` regardless of requested frame rate, so the earlier setting of `1000` was never applied.
+- **Start and stop scripts (`a0511ee`, 2026-11-16)**: Match the detector and dashboard processes by the start of their command line so an `ssh` or shell session mentioning `CMOSmicRay.py` is never mistaken for the running detector.
 
 ### Fixed
-- `update_status` no longer blocks the capture loop on a weather request, and writes `status.json` atomically.
-- Heartbeat `on_time` is the time since the last successful ping (CREDO sums it server-side).
+- **Restored `"Outdoor"` temperature label on the dashboard**: Fixed `updateWeather()` overwriting the `"Outdoor"` label with `"Station"` (`🌡 Outdoor: XX.X°C (XX.X°F)`).
+- **Fixed alert banner positioning**: Moved `#station-banner` inside `<main class="main-content">` so it is never obscured behind the fixed `.topbar` header.
 
-### Removed (relative to 1.6.0 / `de70d2e`)
-These were already absent from the Oct 2026 refactor and are not restored:
-- The WebSocket live feed; the dashboard polls `detections.json` and `status.json` instead.
-- The `.env` live-reload watcher; restart the detector after changing `.env`.
-- The 1.5.0 wording change: log messages say "Energy" again rather than "Intensity" (the value is a peak grey-level excess, not an energy).
+---
+
+## [1.7.4] - 2026-11-15
+Deployed on the station on 15 Nov 2026 (`8e59794`).
+
+### Added
+- **Camera-Reported Exposure & Gain Verification**: Added `read_camera_controls()` (`v4l2-ctl --get-ctrl`) to query the actual exposure and gain applied by the camera driver at startup and at each hourly `LiveStats` flush. `live_stats.csv` now records both `exposure_setting,gain_setting` (requested) and `exposure_actual,gain_actual` (reported by hardware), logging a warning if the camera clamps the requested value.
+
+---
+
+## [1.7.3] - 2026-11-15
+Deployed on the station on 15 Nov 2026 (`21e87cc`, `80f16b4`).
+
+### Added
+- **Hourly Live-Time Log (`live_stats.csv`)**: Added `LiveStats` to append one row per hour (`STATS_WINDOW_S`, default `3600` s, plus partial-window flush on shutdown/halt) recording processed frame count, event counts by gate (`accepted`, `rejected_hot`, `rejected_spatial`, `near_miss`), capture resolution, exposure/gain, and software version so detection rates can be normalized per live hour of sensor integration.
+- **Station-Local Timestamps**: `trace_diagnostics.csv` and `live_stats.csv` retain their UTC ISO-8601 column and add a station-local timestamp column with explicit UTC offset (e.g., `2026-11-15T19:26:21.123-05:00`). Station timezone is auto-detected (`STATION_TZ`, `/etc/timezone`, `/etc/localtime`) and published in `status.json`. Existing CSVs with an older header schema are automatically retired to `*.legacy-<timestamp>.csv`.
+- **CI & Packaging Tooling**: Added GitHub Actions test workflow (`.github/workflows/tests.yml`), `requirements.txt` / `requirements-dev.txt`, and `packaging/cmosmicray.logrotate`.
+
+---
+
+## [1.7.2] - 2026-11-15
+Deployed on the station on 15 Nov 2026 (`dc8887d`).
+
+### Added
+- **Persistent Hot-Pixel Mask (`HotPixelMask`, `hot_pixels.json`)**: Learns fixed-position sensor defects online from accepted hits. Any pixel coordinate that accumulates `HOT_PIXEL_MIN_HITS` (default `5`) accepted hits is marked hot, and subsequent candidates within `HOT_PIXEL_RADIUS` (default `3` px, a `7×7` neighborhood) are rejected as `REJECTED_HOT`. Masks are persisted in `hot_pixels.json` keyed by capture resolution (`"640x480"`, `"1280x720"`). Motivated by analysis of the 80.4-day pre-v1.7 diagnostic log (`trace_diagnostics_pre_v1.7.csv`), where fixed hot spots accounted for 65% of accepted hits at `1280×720` vs. 1% at `640×480`.
+
+### Changed
+- **Default Capture Resolution Set to `640×480`** (`CAPTURE_WIDTH`, `CAPTURE_HEIGHT`, configurable via `.env`): Matches the resolution the station had been running locally since 11 May 2026 and committed in `de70d2e` (20 May 2026), yielding ~6.0 processed frames/s on a Raspberry Pi Model B vs. ~2.1 frames/s at `1280×720`.
+
+---
+
+## [1.7.1] - 2026-11-15
+Internal milestone (`dc8887d`) reconciling the v1.3–v1.6 safety and filtering gates with the October 2026 modular refactor.
+
+### Added
+- **Restored v1.3–v1.6 Safety & Filtering Pipeline into Modular Architecture**:
+  - 500-frame startup `CalibrationGate` (v1.4.0)
+  - Dual-condition lens-cover obscuration check (`check_obscuration`: end of calibration, every 600 s periodic sweep, and per-hit before upload; v1.4.0–v1.6.0)
+  - Two-tier CPU thermal protection (`thermal_state`: soft warning at `60.0°C`, critical halt at `70.0°C`; v1.4.0, v1.6.0)
+  - 3×3 spatial neighbor filter (`is_spatially_valid`; v1.3.0)
+  - Adaptive and absolute sensitivity thresholds (`min_absolute`, `ratio_threshold`, `ratio_min`; v1.3.0)
+  - Multi-trace iterative frame scanning (up to 3 traces per frame with 64×64 ROI masking; v1.3.1)
+  - Rotating diagnostic trace logger (`TraceLogger` -> `trace_diagnostics.csv`; v1.3.0) and crash-safe append-only detection archive (`detections_archive.jsonl`, kept outside `public/`; `de70d2e`)
+- **Expanded Automated Test Suite (`tests/test_gates.py`)**: Added unit tests covering all safety gates, spatial filtering, multi-trace extraction, hot-pixel masking, CSV schema migration, and atomic status updates (bringing the test suite to 77 tests).
+
+---
+
+## [Refactor / 1.6.1-dev] - 2026-10-30 (`f8d7f2f`)
+*Note on version history:* This modularity and testability refactor encapsulated module-level globals into testable classes (`AppConfig`, `AuthState`, `EnvironmentState`, `LocalStore`, `MotionDetector`), introduced a single-writer thread queue for `detections.json`, bounded upload concurrency (`ThreadPoolExecutor`), corrected CREDO heartbeat `on_time` to send interval `delta`, moved web assets into `public/`, and added the initial `pytest` suite (`test_auth.py`, `test_config.py`, `test_local_log.py`, `test_motion_detector.py`, `test_process_hit.py`).
+
+However, because the refactor branch had been started from an earlier pre-v1.3 snapshot of `CMOSmicRay.py` rather than `de70d2e` (v1.6.0), merging `f8d7f2f` unintentionally omitted the v1.3–v1.6 safety gates, WebSocket telemetry graph, and `.env` watcher. Those omitted features were subsequently audited and restored in **v1.7.1 – v1.7.5**.
 
 ## [1.6.0] - 2026-05-05
 ### Added
